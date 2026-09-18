@@ -1,0 +1,12 @@
+<!DOCTYPE html><html lang=en data-theme=dark><head>
+<meta charset=UTF-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
+<link rel=stylesheet href=/tokens.css?v=fluid1><link rel=stylesheet href=/style.css?v=fluid1>
+</head><body><div id=app><section class="chat-view nl-shell"><aside class="sidebar nl-shell__roster"><div class=sidebar-head><strong>N</strong></div></aside>
+<main class="main nl-shell__chat"><div class=panel><div class=messages></div><form class=compose><textarea></textarea><button id=send-btn>Send</button></form></div></main>
+<aside class=nl-shell__workspace hidden></aside></section></div>
+<pre id=out></pre>
+<script>
+const r=getComputedStyle(document.documentElement),s=document.querySelector(".nl-shell"),c=getComputedStyle(s);
+const d={innerWidth:innerWidth,scrollWidth:document.documentElement.scrollWidth,overflow:document.documentElement.scrollWidth>innerWidth+1,space4:r.getPropertyValue("--space-4").trim(),colorBg:r.getPropertyValue("--color-bg").trim(),brand:r.getPropertyValue("--color-brand").trim(),cols:c.gridTemplateColumns};
+document.getElementById("out").textContent=JSON.stringify(d);
+</script></body></html>

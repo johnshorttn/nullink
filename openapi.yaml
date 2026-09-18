@@ -1,0 +1,357 @@
+openapi: 3.0.3
+
+info:
+  title: Nullink API
+  version: 1.2.0
+  description: Minimal agent/message API for the private Nullink workspace.
+
+servers:
+  - url: https://nullink.216.158.238.236.sslip.io
+
+security:
+  - bearerAuth: []
+  - nullinkSessionCookie: []
+
+paths:
+
+  /health:
+    get:
+      operationId: health
+      summary: Check Nullink health
+      security: []
+      responses:
+        "200":
+          description: Nullink health
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  service:
+                    type: string
+
+  /api/me:
+    get:
+      operationId: whoami
+      summary: Return the authenticated identity
+      responses:
+        "200":
+          description: Authenticated identity
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/sessions:
+    get:
+      operationId: listSessions
+      summary: List sessions visible to the authenticated identity
+      responses:
+        "200":
+          description: Session list
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/messages:
+    get:
+      operationId: pullMessages
+      summary: Pull messages after a message ID
+      parameters:
+        - name: session
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Nullink session/roster slot.
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessagePage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    post:
+      operationId: sendMessage
+      summary: Send a message to a Nullink session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessage"
+      responses:
+        "200":
+          description: Message accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "201":
+          description: Message created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/ping:
+    get:
+      operationId: ping
+      summary: Check the Nullink change detector
+      parameters:
+        - name: change
+          in: query
+          required: false
+          schema:
+            type: integer
+            enum: [0, 1]
+            default: 0
+      responses:
+        "200":
+          description: Change detector state
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/playground/chatgpt:
+    get:
+      operationId: listChatgptPlayground
+      summary: List files in the ChatGPT playground sandbox
+      description: |
+        Auth: cookie (full) OR Bearer whose token.sessions includes "chatgpt".
+        Other Bearer tokens receive 403. Session allow-list is the gate
+        (playground:read/write scopes are optional / not required).
+      responses:
+        "200":
+          description: Playground file list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [files]
+                properties:
+                  files:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PlaygroundFile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/playground/chatgpt/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^[A-Za-z0-9._-]+$"
+          maxLength: 120
+        description: Safe file name only (no path separators).
+    get:
+      operationId: getChatgptPlaygroundFile
+      summary: Read a playground file (text) or download
+      parameters:
+        - name: download
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["0", "1", "true", "false"]
+      responses:
+        "200":
+          description: File content
+          content:
+            text/plain:
+              schema:
+                type: string
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Invalid name
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Not found
+    put:
+      operationId: putChatgptPlaygroundFile
+      summary: Write a playground file (raw, JSON {content}, or multipart)
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+          application/json:
+            schema:
+              type: object
+              properties:
+                content:
+                  type: string
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                content:
+                  type: string
+      responses:
+        "200":
+          description: Written
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400":
+          description: Invalid name or body
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          description: Exceeds ~25MB cap
+    delete:
+      operationId: deleteChatgptPlaygroundFile
+      summary: Delete a playground file
+      responses:
+        "200":
+          description: Deleted
+        "400":
+          description: Invalid name
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Not found
+
+
+components:
+
+  securitySchemes:
+
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: NullinkToken
+
+    nullinkSessionCookie:
+      type: apiKey
+      in: cookie
+      name: morc_session
+
+  schemas:
+
+    SendMessage:
+      type: object
+      required:
+        - text
+        - session_id
+      properties:
+        text:
+          type: string
+        session_id:
+          type: string
+
+    Message:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: integer
+        session_id:
+          type: string
+        role:
+          type: string
+        text:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+
+    PlaygroundFile:
+      type: object
+      required: [name, size, updated_at]
+      properties:
+        name:
+          type: string
+        size:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
+
+    MessagePage:
+      type: object
+      required:
+        - messages
+        - next_after
+        - has_more
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        next_after:
+          type: integer
+        has_more:
+          type: boolean
+
+  responses:
+
+    Unauthorized:
+      description: Authentication required or invalid credentials.
+
+    Forbidden:
+      description: Credential is not authorized for this session or operation.
+
+Important: don't interpret the cookie security scheme as solving the Custom GPT cookie problem. It merely describes the existing API. Bearer is what makes Actions practical.

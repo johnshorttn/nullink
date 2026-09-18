@@ -1,0 +1,142 @@
+Nullink PM — Private Workspace Bridge
+=====================================
+
+PRODUCTION (VPS — prefer this):
+  https://nullink.216.158.238.236.sslip.io
+  Health: https://nullink.216.158.238.236.sslip.io/health
+  App path on VPS: /opt/nullink
+  systemd: nullink.service  |  reverse proxy: Caddy → 127.0.0.1:8766
+  SSH helper: /workspace/server/scripts/nullink-ssh.sh
+  Runbook: /workspace/server/NULLINK-SERVER.md
+  Fresh OTP on VPS: ssh … 'cd /opt/nullink && python3 set_otp.py'
+  Clear PIN (this box copy): /workspace/server/secrets/nullink-CURRENT_PIN.txt
+  Morc reply on VPS: ssh … 'cd /opt/nullink && python3 reply.py "…"'
+
+LOCAL / LEGACY tunnels (box only — superseded by VPS HTTPS above):
+
+Public URL (legacy localtunnel): https://nullink.loca.lt
+Alt (no interstitial): DEAD-DO-NOT-USE https://minds-thank-introduction-carriers.trycloudflare.com
+Local:      http://127.0.0.1:8766
+Health:     GET /health  → {"ok":true,"service":"nullink","port":8766,"pm":true}
+
+Brand: Nullink (corporate-friendly). Tagline: "Secure session access" /
+       "Nullink — private workspace PM"
+Session label inside chat: Chief of Staff (Morc) (id=morc)
+
+PIDs (as of last write — re-check with ss/pgrep if stale):
+  Server:      1183099  (python3 server.py, port 8766)
+  Tunnel LT:   1178154  (localtunnel → https://nullink.loca.lt → 8766)
+  Tunnel CF:   1178153  (cloudflared → DEAD-DO-NOT-USE https://minds-thank-introduction-carriers.trycloudflare.com → 8766)
+
+OTP / PIN
+---------
+- Rotate PIN with:
+    python3 /workspace/chat-bridge/set_otp.py
+    python3 /workspace/chat-bridge/set_otp.py 123456
+  or localhost only: POST /api/admin/set-otp {"pin":"123456"}
+- Clear PIN for telling John: /workspace/chat-bridge/secrets/CURRENT_PIN.txt
+- Hashed store: /workspace/chat-bridge/secrets/otp.json
+- John enters PIN on landing page → 24h httpOnly session cookie (morc_session)
+- Rate limit: 5 failed attempts → 15 minute lock
+- Do not log raw PIN
+
+PM features (v1)
+----------------
+- Labels CRUD → data/labels.json (seed: YMS, Nullink, Inbox)
+- File registry → data/files.json (uploads/ + data/files/ vault + scratch/)
+- Upload multipart POST /api/files/upload (max 50MB, no execute)
+- Embedded monospace editor with line-number gutter
+- Preview → scratch/<id>-preview.txt (no Morc notify alone)
+- Ask Morc → pending.notify + pending.ask with path/labels/line_count
+- Pull / Accept scratch into editor; Save to vault file
+
+
+Webhook wake
+-------------
+- Config: /workspace/chat-bridge/secrets/webhook.json
+- Template: /workspace/chat-bridge/secrets/webhook.json.example
+- fill webhook.json from Nullink webhook wake routine panel; leave it absent or enabled:false until Morc supplies the URL and auth header.
+- Test: python3 /workspace/chat-bridge/scripts/test_webhook.py
+- Events: message, ask_morc, upload; failures log to /tmp/nullink-webhook.log.
+
+APIs (session cookie required unless noted)
+------------------------------------------
+Auth / chat (existing):
+  GET  /api/me
+  POST /api/auth/verify  {"pin":"######"}
+  POST /api/auth/logout
+  GET  /api/sessions
+  GET  /api/messages?session=morc&after=N
+  GET  /api/messages/stream  (SSE)
+  POST /api/messages  {"text":"...","session_id":"morc"}
+
+Labels:
+  GET    /api/labels
+  POST   /api/labels  {"name":"...","color":"#hex?"}
+  PATCH  /api/labels/<id>  {"name"?:,"color"?:}
+  DELETE /api/labels/<id>
+
+Files:
+  GET  /api/files?label=<id>
+  GET  /api/files/<id>
+  GET  /api/files/<id>/content
+  GET  /api/files/<id>/download
+  POST /api/files/upload   multipart field "file" + "labels"
+  POST /api/files/save     {"id"?:,"name"?:,"content":"...","labels"?:[]}
+  PATCH /api/files/<id>    {"name"?:,"labels"?:[]}
+  DELETE /api/files/<id>
+  POST /api/files/register {"path":"/workspace/...","name"?:,"labels"?:[]}
+       (localhost or session; copies into data/files/ vault)
+  POST /api/files/preview  {"content"?:,"file_id"?:,"scratch_id"?:,"name"?:}
+  POST /api/files/ask-morc {"scratch_id"?:,"content"?:,"file_id"?:,"message"?:,"labels"?:[]}
+  POST /api/files/pull-scratch   {"scratch_id":"..."}
+  POST /api/files/accept-scratch {"scratch_id":"...","save"?:true,"file_id"?:}
+  GET  /api/scratch/<id>
+
+Admin (localhost only):
+  POST /api/admin/set-otp {"pin":"######"}
+  POST /api/admin/reply   {"text":"..."}
+
+How Morc replies
+----------------
+  python3 /workspace/chat-bridge/reply.py "Your message to John"
+  or localhost: POST /api/admin/reply {"text":"..."}
+
+John sends from UI → data/messages.jsonl (role=user) + data/pending.notify
+Ask Morc / upload also set pending.ask / pending.upload (mirrored to pending.notify)
+
+Register a box file into the vault:
+  curl -sS -H 'Content-Type: application/json' \
+    -d '{"path":"/workspace/chat-bridge/...","labels":["nullink"]}' \
+    http://127.0.0.1:8766/api/files/register
+  or: python3 /workspace/chat-bridge/register_file.py /path/to/file.txt nullink
+
+LEGACY tunnel preference (local box only — prefer VPS HTTPS; never touch 8765/YMS)
+---------------------------------------------------------
+1. Prefer named: npx --yes localtunnel --port 8766 --subdomain nullink
+   → https://nullink.loca.lt  (may show Bypass interstitial in browsers)
+2. Else: ./cloudflared tunnel --url http://127.0.0.1:8766 --no-autoupdate
+Active: both LT + CF up. Prefer nullink.loca.lt in chat; CF if interstitial blocks.
+
+Playbook: /workspace/chat-bridge/NULLINK-PLAYBOOK.md
+Trigger word: "Nullink"
+
+Do NOT use port 8765 (YMS questionnaire).
+Written: 2026-09-16 14:37:36 UTC
+
+Scoped Bearer tokens (agent auth) — 2026-09-17
+-----------------------------------------------
+- Store: data/auth_tokens.json (SHA-256 hash at rest; plaintext returned once)
+- Admin (cookie morc_session only):
+    POST   /api/auth/tokens   {"name","scopes","sessions","expires_in?"}
+    GET    /api/auth/tokens   (metadata only; no plaintext)
+    DELETE /api/auth/tokens/<id>
+- Agents: Authorization: Bearer nlk_…
+- Precedence: Bearer → else morc_session. /health public. UI cookie unchanged.
+- GET /api/messages returns {messages, next_after, has_more}; limit 1..100
+- ChatGPT-scoped tokens 403 on session=morc
+- MCP adapter (separate stdio, NOT in request path):
+    /opt/nullink/mcp_server.py
+    env NULLINK_URL=https://nullink.216.158.238.236.sslip.io
+    env NULLINK_TOKEN=nlk_…   (mint via POST /api/auth/tokens; VPS may keep
+    secrets/NULLINK_TOKEN_chatgpt.txt mode 600)

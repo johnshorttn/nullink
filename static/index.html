@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Nullink</title>
+  <link rel="stylesheet" href="/tokens.css?v=fluid4c" />
+  <link rel="stylesheet" href="/style.css?v=fluid4c" />
+</head>
+<body>
+  <div id="app">
+    <!-- Auth gate -->
+    <section id="auth-view" class="auth-view hidden">
+      <div class="auth-card">
+        <div class="logo">N</div>
+        <h1>Nullink</h1>
+        <p class="sub">Secure session access — enter the 6-digit PIN from chat.</p>
+        <form id="pin-form" autocomplete="one-time-code">
+          <input
+            id="pin-input"
+            type="text"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="6"
+            placeholder="••••••"
+            aria-label="6-digit PIN"
+            autofocus
+          />
+          <button type="submit" id="pin-submit">Unlock</button>
+        </form>
+        <p id="auth-error" class="error" role="alert"></p>
+      </div>
+    </section>
+
+    <!-- Main workspace -->
+    <section id="chat-view" class="chat-view nl-shell hidden" data-theme-surface="shell">
+      <aside class="sidebar nl-shell__roster" id="roster-drawer" aria-label="Roster">
+        <div class="sidebar-head">
+          <span class="mark">N</span>
+          <div class="sidebar-head-text">
+            <strong>Roster</strong>
+            <small>Agents &amp; sessions</small>
+          </div>
+          <button type="button" id="btn-roster-close" class="ghost tiny nl-roster-close" aria-label="Close roster" title="Close">×</button>
+        </div>
+        <div class="nl-roster-search-wrap">
+          <input id="roster-search" type="search" class="nl-roster-search" placeholder="Search…" autocomplete="off" aria-label="Search roster" />
+        </div>
+
+        <div class="presence-row" id="presence-row">
+          <span id="presence-chip" class="presence-chip status-offline" title="Presence">
+            <span class="presence-dot" aria-hidden="true"></span>
+            <span id="presence-label">Morc …</span>
+          </span>
+          <button type="button" id="inbox-toggle" class="inbox-toggle" title="Inbox">
+            Inbox <span id="inbox-badge" class="inbox-badge hidden">0</span>
+          </button>
+        </div>
+        <div id="inbox-panel" class="inbox-panel hidden" aria-live="polite">
+          <div class="inbox-panel-head">
+            <span>Needs you</span>
+            <button type="button" id="inbox-refresh" class="ghost tiny">↻</button>
+          </div>
+          <ul id="inbox-list" class="inbox-list"></ul>
+          <p id="inbox-empty" class="inbox-empty hint">Inbox clear.</p>
+        </div>
+
+        <div class="mode-tabs" role="tablist">
+          <button type="button" class="mode-tab active" data-mode="chat" id="tab-chat">Chat</button>
+          <button type="button" class="mode-tab" data-mode="files" id="tab-files">Files</button>
+          <button type="button" class="mode-tab" data-mode="apps" id="tab-apps">Apps</button>
+          <button type="button" class="mode-tab" data-mode="vault" id="tab-vault">Vault</button>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="section-label">Labels</div>
+          <div id="label-chips" class="label-chips"></div>
+          <form id="new-label-form" class="new-label-form">
+            <input id="new-label-name" type="text" placeholder="New label…" maxlength="40" />
+            <button type="submit" class="ghost tiny" title="Add label">+</button>
+          </form>
+        </div>
+
+        <div id="files-sidebar" class="sidebar-section files-sidebar hidden">
+          <div class="section-label-row">
+            <span class="section-label">Files</span>
+            <label class="upload-btn ghost tiny" title="Upload">
+              ↑
+              <input type="file" id="upload-input" multiple hidden />
+            </label>
+          </div>
+          <ul id="file-list" class="file-list"></ul>
+        </div>
+
+        <div id="chat-sidebar" class="sidebar-section">
+          <div class="section-label">Roster</div>
+          <div id="roster-root" class="roster-root"></div>
+        </div>
+
+        <div id="apps-sidebar" class="sidebar-section apps-sidebar hidden">
+          <div class="section-label">Apps</div>
+          <ul id="apps-list" class="apps-list"></ul>
+          <p class="hint apps-hint">Allowlisted VPS apps only. Desktop uses same-origin Guacamole.</p>
+        </div>
+
+
+        <div id="vault-sidebar" class="sidebar-section vault-sidebar hidden">
+          <div class="section-label-row">
+            <span class="section-label">Vault</span>
+            <button type="button" id="vault-new-btn" class="ghost tiny" title="New snippet">+</button>
+          </div>
+          <input id="vault-search" type="search" class="vault-search" placeholder="Search vault…" autocomplete="off" />
+          <ul id="vault-list" class="vault-list"></ul>
+          <p id="vault-empty" class="hint vault-empty">No snippets yet.</p>
+        </div>
+
+        <button type="button" id="logout-btn" class="ghost">Sign out</button>
+        <button type="button" id="nl-resize-roster" class="nl-resize-handle" aria-label="Resize roster" title="Drag to resize roster"></button>
+      </aside>
+      <button type="button" id="nl-roster-rail" class="nl-collapsed-rail hidden" aria-label="Expand roster" title="Show roster">Roster</button>
+
+      <div id="sidebar-backdrop" class="sidebar-backdrop hidden" aria-hidden="true"></div>
+
+      <main class="main nl-shell__chat">
+        <div class="workspace-chrome" id="workspace-chrome">
+          <button type="button" id="btn-nav" class="ghost nav-toggle" aria-label="Open menu" title="Menu">☰</button>
+          <div class="chrome-modes" role="tablist" aria-label="Mode">
+            <button type="button" class="chrome-mode active" data-mode="chat" id="chrome-tab-chat">Chat</button>
+            <button type="button" class="chrome-mode" data-mode="files" id="chrome-tab-files">Files</button>
+            <button type="button" class="chrome-mode" data-mode="apps" id="chrome-tab-apps">Apps</button>
+            <button type="button" class="chrome-mode" data-mode="vault" id="chrome-tab-vault">Vault</button>
+          </div>
+          <div class="chrome-layout" id="chrome-layout" title="Layout (wide screens)">
+            <button type="button" id="btn-roster-toggle" class="nl-panel-toggle" aria-pressed="true" title="Collapse roster">Roster ‹</button>
+            <button type="button" id="btn-chat-minimize" class="ghost tiny layout-btn" aria-pressed="false" title="Minimize chat">Min chat</button>
+            <button type="button" id="btn-split" class="ghost tiny layout-btn" aria-pressed="false">Split</button>
+            <button type="button" id="btn-sec-files" class="ghost tiny layout-btn" data-secondary="files" aria-pressed="false">Files pane</button>
+            <button type="button" id="btn-sec-apps" class="ghost tiny layout-btn" data-secondary="apps" aria-pressed="false">Apps pane</button>
+            <button type="button" id="btn-workspace-toggle" class="nl-panel-toggle" aria-pressed="false" title="Toggle workspace panel">› Workspace</button>
+          </div>
+          <span id="chrome-status" class="chrome-status" aria-hidden="true"></span>
+        </div>
+
+        <!-- Chat panel -->
+        <button type="button" id="chat-restore-bar" class="chat-restore-bar hidden" title="Restore chat">Chat ▸</button>
+        <div id="panel-chat" class="panel">
+          <header class="chat-header">
+            <div class="chat-header-top">
+              <button type="button" id="btn-chat-back" class="ghost tiny nl-chat-back" aria-label="Open roster" title="Roster">‹</button>
+              <h2 id="chat-title">Chief of Staff (Morc)</h2>
+              <span id="status-dot" class="status" title="Connected">●</span>
+              <button type="button" id="btn-chat-minimize-hdr" class="ghost tiny chat-min-btn" title="Minimize chat" aria-label="Minimize chat">─</button>
+            </div>
+            <div id="session-memory" class="session-memory" aria-label="Session memory">
+              <div class="session-memory-head" id="session-memory-head">
+                <button type="button" class="session-memory-toggle" id="session-memory-toggle" aria-expanded="true" aria-controls="session-memory-body">
+                  <span class="nl-brief-chevron" aria-hidden="true">▾</span>
+                  <span>Session brief</span>
+                </button>
+                <span id="session-memory-updated" class="muted-meta"></span>
+                <button type="button" id="session-memory-save" class="ghost tiny" title="Save brief">Save</button>
+              </div>
+              <div id="session-memory-body" class="session-memory-body">
+              <label class="sm-field">Goal
+                <input id="sm-goal" type="text" maxlength="500" placeholder="Current goal…" />
+              </label>
+              <label class="sm-field">Last decision
+                <input id="sm-last-decision" type="text" maxlength="500" placeholder="Last decision…" />
+              </label>
+              <label class="sm-field">Blockers
+                <input id="sm-blockers" type="text" maxlength="500" placeholder="Blockers…" />
+              </label>
+              <label class="sm-field">Notes
+                <textarea id="sm-notes" rows="2" maxlength="2000" placeholder="Notes…"></textarea>
+              </label>
+              </div>
+            </div>
+            <div class="chat-toolbar">
+              <input
+                id="search-input"
+                type="search"
+                placeholder="Search chat…"
+                aria-label="Search messages"
+                autocomplete="off"
+              />
+              <button type="button" id="jump-start" class="ghost toolbar-btn" title="Jump to oldest">Oldest</button>
+              <button type="button" id="jump-end" class="ghost toolbar-btn" title="Jump to newest">Newest</button>
+            </div>
+          </header>
+          <div id="messages" class="messages" aria-live="polite"></div>
+          <form id="compose" class="compose">
+            <textarea
+              id="compose-input"
+              rows="1"
+              placeholder="Type a message…"
+              maxlength="8000"
+            ></textarea>
+            <button type="submit" id="send-btn" aria-label="Send">Send</button>
+          </form>
+        </div>
+
+        <!-- Files / editor panel -->
+        <div id="panel-files" class="panel hidden">
+          <header class="editor-header">
+            <div class="editor-title-row">
+              <h2 id="editor-filename">No file open</h2>
+              <span id="editor-dirty" class="dirty hidden">●</span>
+              <span id="editor-meta" class="muted-meta"></span>
+            </div>
+            <div class="editor-toolbar">
+              <button type="button" id="btn-save" class="ghost toolbar-btn" disabled>Save</button>
+              <button type="button" id="btn-preview" class="ghost toolbar-btn" disabled>Preview</button>
+              <button type="button" id="btn-ask" class="accent-btn toolbar-btn" disabled>Ask Morc</button>
+              <button type="button" id="btn-pull" class="ghost toolbar-btn" disabled>Pull updates</button>
+              <button type="button" id="btn-accept" class="ghost toolbar-btn" disabled>Accept</button>
+              <button type="button" id="btn-reject" class="ghost toolbar-btn" disabled>Reject</button>
+              <button type="button" id="btn-diff" class="ghost toolbar-btn" disabled>Diff</button>
+              <button type="button" id="btn-download" class="ghost toolbar-btn" disabled>Download</button>
+              <button type="button" id="btn-new-file" class="ghost toolbar-btn">New</button>
+            </div>
+          </header>
+          <div id="ask-box" class="ask-box hidden">
+            <input id="ask-message" type="text" placeholder="What do you need? (optional note for Morc)" maxlength="500" />
+            <button type="button" id="ask-send" class="accent-btn">Send to Morc</button>
+            <button type="button" id="ask-cancel" class="ghost">Cancel</button>
+          </div>
+          <div id="diff-panel" class="diff-panel hidden" aria-live="polite">
+            <div class="diff-panel-head">
+              <strong>Unified diff</strong>
+              <span id="diff-meta" class="muted-meta"></span>
+              <div class="diff-actions">
+                <button type="button" id="diff-accept" class="accent-btn tiny">Accept</button>
+                <button type="button" id="diff-reject" class="ghost tiny">Reject</button>
+                <button type="button" id="diff-ask" class="ghost tiny">Ask Morc</button>
+                <button type="button" id="diff-close" class="ghost tiny">Hide</button>
+              </div>
+            </div>
+            <pre id="diff-view" class="diff-view"></pre>
+          </div>
+          <div id="editor-empty" class="editor-empty">
+            <p>Select a file from the sidebar, upload one, or create <strong>New</strong>.</p>
+            <p class="hint">Preview writes scratch without notifying Morc. Ask Morc notifies and attaches the scratch path.</p>
+          </div>
+          <div id="editor-wrap" class="editor-wrap hidden">
+            <div id="gutter" class="gutter" aria-hidden="true"></div>
+            <textarea id="editor" class="editor" spellcheck="false" wrap="off"></textarea>
+          </div>
+          <div id="scratch-status" class="scratch-status hidden"></div>
+        </div>
+
+        <!-- Apps panel -->
+        <div id="panel-apps" class="panel hidden">
+          <header class="apps-header">
+            <div class="apps-title-row">
+              <h2 id="apps-title">Apps</h2>
+              <span id="apps-meta" class="muted-meta"></span>
+            </div>
+            <div class="apps-toolbar">
+              <button type="button" id="btn-apps-refresh" class="ghost toolbar-btn">Refresh</button>
+              <button type="button" id="btn-apps-open" class="ghost toolbar-btn" disabled>Open tab</button>
+            </div>
+          </header>
+          <div id="apps-empty" class="editor-empty">
+            <p>Select an app from the sidebar to embed it here.</p>
+            <p class="hint">VPS Desktop opens Guacamole at <code>/desktop/</code> (same origin).</p>
+          </div>
+          <div id="apps-frame-wrap" class="apps-frame-wrap hidden">
+            <iframe id="apps-frame" class="apps-frame" title="App" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+          </div>
+        </div>
+
+        <!-- Vault snippets panel -->
+        <div id="panel-vault" class="panel hidden">
+          <header class="vault-header">
+            <div class="vault-title-row">
+              <h2 id="vault-title">Vault</h2>
+              <span id="vault-meta" class="muted-meta"></span>
+            </div>
+            <div class="vault-toolbar">
+              <button type="button" id="vault-save-btn" class="accent-btn toolbar-btn" disabled>Save</button>
+              <button type="button" id="vault-delete-btn" class="ghost toolbar-btn" disabled>Delete</button>
+              <button type="button" id="vault-new-btn-main" class="ghost toolbar-btn">New</button>
+            </div>
+          </header>
+          <div id="vault-editor-empty" class="editor-empty">
+            <p>OTP-gated notes — not in chat history. Stored under <code>data/vault/</code> (mode 0600).</p>
+            <p class="hint">Create a snippet from the sidebar or <strong>New</strong>.</p>
+          </div>
+          <div id="vault-editor-wrap" class="vault-editor-wrap hidden">
+            <label class="vault-field">Title
+              <input id="vault-title-input" type="text" maxlength="200" placeholder="Title…" />
+            </label>
+            <label class="vault-field">Tags <span class="hint">(comma-separated)</span>
+              <input id="vault-tags-input" type="text" maxlength="200" placeholder="creds, otp, notes…" />
+            </label>
+            <label class="vault-field vault-body-field">Body
+              <textarea id="vault-body-input" spellcheck="false" placeholder="Snippet body…"></textarea>
+            </label>
+          </div>
+        </div>
+
+      </main>
+
+      <!-- Fluid Slice 2: Pixel bottom nav (mobile ≤767 only) -->
+      <nav id="nl-bottom-nav" class="nl-bottom-nav" aria-label="Primary">
+        <button type="button" class="nl-bottom-nav__item" data-nav="roster" aria-label="Roster" aria-controls="roster-drawer">
+          <span class="nl-bottom-nav__icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M8 7h11M8 12h11M8 17h11"/><circle cx="5" cy="7" r="1.25" fill="currentColor" stroke="none"/><circle cx="5" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="5" cy="17" r="1.25" fill="currentColor" stroke="none"/></svg>
+          </span>
+          <span class="nl-bottom-nav__label">Roster</span>
+        </button>
+        <button type="button" class="nl-bottom-nav__item is-selected" data-nav="chat" aria-label="Chat" aria-current="page">
+          <span class="nl-bottom-nav__icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H9l-4 3.5V6.5z"/></svg>
+          </span>
+          <span class="nl-bottom-nav__label">Chat</span>
+        </button>
+        <button type="button" class="nl-bottom-nav__item" data-nav="tools" aria-label="Tools" aria-controls="nl-tools-sheet">
+          <span class="nl-bottom-nav__icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.1 2.1-1.9-1.9 2-2.1z"/></svg>
+          </span>
+          <span class="nl-bottom-nav__label">Tools</span>
+        </button>
+      </nav>
+
+      <!-- Fluid Slice 2: Tools workspace sheet (mobile) -->
+      <div id="nl-tools-backdrop" class="nl-tools-backdrop hidden" aria-hidden="true"></div>
+      <div id="nl-tools-sheet" class="nl-tools-sheet hidden" role="dialog" aria-modal="true" aria-label="Tools" aria-hidden="true">
+        <div class="nl-tools-sheet__handle" aria-hidden="true"></div>
+        <header class="nl-tools-sheet__head">
+          <strong>Tools</strong>
+          <button type="button" id="btn-tools-close" class="ghost tiny" aria-label="Close tools">×</button>
+        </header>
+        <div class="nl-tools-sheet__grid" role="list">
+          <button type="button" class="nl-tools-tile" data-tool="files" role="listitem">
+            <span class="nl-tools-tile__icon" aria-hidden="true">📁</span>
+            <span class="nl-tools-tile__label">Files</span>
+            <span class="nl-tools-tile__hint">Upload &amp; edit</span>
+          </button>
+          <button type="button" class="nl-tools-tile" data-tool="desktop" role="listitem">
+            <span class="nl-tools-tile__icon" aria-hidden="true">🖥️</span>
+            <span class="nl-tools-tile__label">Desktop</span>
+            <span class="nl-tools-tile__hint">VPS Guacamole</span>
+          </button>
+          <button type="button" class="nl-tools-tile" data-tool="android" role="listitem">
+            <span class="nl-tools-tile__icon" aria-hidden="true">📱</span>
+            <span class="nl-tools-tile__label">Android</span>
+            <span class="nl-tools-tile__hint">/android/</span>
+          </button>
+          <button type="button" class="nl-tools-tile" data-tool="apps" role="listitem">
+            <span class="nl-tools-tile__icon" aria-hidden="true">▦</span>
+            <span class="nl-tools-tile__label">Apps</span>
+            <span class="nl-tools-tile__hint">Allowlisted</span>
+          </button>
+          <button type="button" class="nl-tools-tile" data-tool="playground" role="listitem">
+            <span class="nl-tools-tile__icon" aria-hidden="true">🧪</span>
+            <span class="nl-tools-tile__label">Playground</span>
+            <span class="nl-tools-tile__hint">ChatGPT sandbox</span>
+          </button>
+          <button type="button" class="nl-tools-tile" data-tool="vault" role="listitem">
+            <span class="nl-tools-tile__icon" aria-hidden="true">🔐</span>
+            <span class="nl-tools-tile__label">Vault</span>
+            <span class="nl-tools-tile__hint">OTP notes</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Fluid Slice 4: workspace panel (3-pane ≥1400) -->
+      <aside class="nl-shell__workspace" id="nl-workspace-slot" aria-label="Workspace" aria-hidden="true" hidden>
+        <button type="button" id="nl-resize-workspace" class="nl-resize-handle nl-resize-handle--workspace hidden" aria-label="Resize workspace" title="Drag to resize workspace"></button>
+<div class="nl-workspace-head">
+          <strong>Workspace</strong>
+          <button type="button" id="btn-workspace-collapse" class="ghost tiny" title="Collapse workspace" aria-label="Collapse workspace">›</button>
+        </div>
+        <div class="nl-workspace-body" role="list">
+          <button type="button" class="nl-workspace-tile" data-tool="files" role="listitem">
+            <span class="nl-workspace-tile__label">Files</span>
+            <span class="nl-workspace-tile__hint">Browse &amp; edit</span>
+          </button>
+          <button type="button" class="nl-workspace-tile" data-tool="apps" role="listitem">
+            <span class="nl-workspace-tile__label">Apps</span>
+            <span class="nl-workspace-tile__hint">Allowlisted</span>
+          </button>
+          <button type="button" class="nl-workspace-tile" data-tool="desktop" role="listitem">
+            <span class="nl-workspace-tile__label">Desktop</span>
+            <span class="nl-workspace-tile__hint">VPS Guacamole</span>
+          </button>
+          <button type="button" class="nl-workspace-tile" data-tool="android" role="listitem">
+            <span class="nl-workspace-tile__label">Android</span>
+            <span class="nl-workspace-tile__hint">/android/</span>
+          </button>
+          <button type="button" class="nl-workspace-tile" data-tool="playground" role="listitem">
+            <span class="nl-workspace-tile__label">Playground</span>
+            <span class="nl-workspace-tile__hint">ChatGPT sandbox</span>
+          </button>
+          <button type="button" class="nl-workspace-tile" data-tool="vault" role="listitem">
+            <span class="nl-workspace-tile__label">Vault</span>
+            <span class="nl-workspace-tile__hint">OTP notes</span>
+          </button>
+        </div>
+      </aside>
+      <button type="button" id="nl-workspace-rail" class="nl-collapsed-rail nl-collapsed-rail--workspace hidden" aria-label="Expand workspace" title="Show workspace">Workspace</button>
+
+    </section>
+  </div>
+  
+  <div id="sel-toolbar" class="sel-toolbar hidden" role="toolbar" aria-label="Selection actions">
+    <button type="button" id="sel-make-task" class="sel-btn">Make task</button>
+    <button type="button" id="sel-add-label" class="sel-btn">Add label</button>
+    <button type="button" id="sel-ask-morc" class="sel-btn accent">Ask Morc</button>
+  </div>
+  <div id="sel-label-picker" class="sel-label-picker hidden" role="dialog" aria-label="Choose label">
+    <div class="sel-label-picker-card">
+      <div class="sel-label-picker-head">
+        <strong>Attach to label</strong>
+        <button type="button" id="sel-label-cancel" class="ghost tiny">✕</button>
+      </div>
+      <div id="sel-label-list" class="sel-label-list"></div>
+      <p class="hint">Creates a paste file with that label (shows in Files).</p>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/app.js?v=fluid4c"></script>
+</body>
+</html>
