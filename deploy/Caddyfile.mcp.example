@@ -1,0 +1,9 @@
+# Place this handler inside the existing Nullink HTTPS site block, before the
+# catch-all reverse_proxy to port 8766.
+handle /mcp {
+    reverse_proxy 127.0.0.1:8767
+}
+
+handle {
+    reverse_proxy 127.0.0.1:8766
+}

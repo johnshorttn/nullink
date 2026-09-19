@@ -1,0 +1,25 @@
+[Unit]
+Description=Nullink remote MCP gateway
+After=network-online.target nullink.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nullink
+Group=nullink
+WorkingDirectory=/opt/nullink
+Environment=NULLINK_URL=http://127.0.0.1:8766
+Environment=NULLINK_TOKEN_FILE=/opt/nullink/secrets/NULLINK_TOKEN_chatgpt.txt
+Environment=NULLINK_MCP_HOST=127.0.0.1
+Environment=NULLINK_MCP_PORT=8767
+ExecStart=/usr/bin/python3 /opt/nullink/mcp_http_server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/nullink
+
+[Install]
+WantedBy=multi-user.target
