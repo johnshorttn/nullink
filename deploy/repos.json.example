@@ -1,0 +1,29 @@
+{
+  "repositories": {
+    "johnshorttn/nullink": {
+      "path": "/opt/nullink",
+      "branch": "main",
+      "services": ["nullink.service"],
+      "test_commands": [
+        ["/usr/bin/python3", "-m", "py_compile", "server.py", "mcp_http_server.py"],
+        ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "tests", "-v"]
+      ],
+      "health_checks": [
+        {
+          "url": "http://127.0.0.1:8766/health",
+          "status": 200,
+          "json": {"ok": true, "service": "nullink"}
+        }
+      ]
+    },
+    "johnshorttn/storycast": {
+      "path": "/opt/storycast-app",
+      "branch": "main",
+      "services": ["storycast-app.service"],
+      "test_commands": [],
+      "health_checks": [
+        {"url": "http://127.0.0.1:3000/", "status": 200}
+      ]
+    }
+  }
+}

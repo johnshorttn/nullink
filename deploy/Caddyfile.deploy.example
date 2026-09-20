@@ -1,0 +1,7 @@
+# Add before Nullink's catch-all reverse_proxy. GitHub sends signed push events
+# here; the hook itself listens only on 127.0.0.1.
+handle /__deploy/github {
+    reverse_proxy 127.0.0.1:8768
+}
+
+# Do not expose the deploy service's /health route publicly.

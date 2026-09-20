@@ -1,0 +1,30 @@
+[Unit]
+Description=Signed GitHub deployment hook for approved VPS repositories
+After=network-online.target nullink.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/nullink
+Environment=NULLINK_DEPLOY_HOST=127.0.0.1
+Environment=NULLINK_DEPLOY_PORT=8768
+Environment=NULLINK_DEPLOY_SECRET_FILE=/opt/nullink/secrets/DEPLOY_WEBHOOK_SECRET.txt
+Environment=NULLINK_DEPLOY_WORKER=/opt/nullink/deploy/deploy_worker.py
+Environment=SERVER_DEPLOY_CONFIG=/etc/server-deploy/repos.json
+Environment=SERVER_DEPLOY_STATE=/var/lib/server-deploy
+ExecStart=/usr/bin/python3 /opt/nullink/deploy/deploy_webhook.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt /var/lib/server-deploy /run
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
