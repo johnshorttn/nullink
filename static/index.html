@@ -14,16 +14,20 @@
       <div class="auth-card">
         <div class="logo">N</div>
         <h1>Nullink</h1>
-        <p class="sub">Secure session access — enter the 6-digit PIN from chat.</p>
+        <p class="sub" id="auth-help">Secure session access — enter the 6-digit PIN from chat.</p>
+        <div id="auth-methods" class="auth-methods hidden" role="tablist" aria-label="Login method">
+          <button type="button" id="auth-method-totp" class="auth-method active" role="tab" aria-selected="true">Authenticator</button>
+          <button type="button" id="auth-method-pin" class="auth-method" role="tab" aria-selected="false">PIN</button>
+        </div>
         <form id="pin-form" autocomplete="one-time-code">
           <input
             id="pin-input"
             type="text"
             inputmode="numeric"
             pattern="[0-9]*"
-            maxlength="6"
+            maxlength="12"
             placeholder="••••••"
-            aria-label="6-digit PIN"
+            aria-label="Nullink access code"
             autofocus
           />
           <button type="submit" id="pin-submit">Unlock</button>
@@ -114,9 +118,50 @@
           <p id="vault-empty" class="hint vault-empty">No snippets yet.</p>
         </div>
 
+        <button type="button" id="security-btn" class="ghost">Authenticator security</button>
         <button type="button" id="logout-btn" class="ghost">Sign out</button>
         <button type="button" id="nl-resize-roster" class="nl-resize-handle" aria-label="Resize roster" title="Drag to resize roster"></button>
       </aside>
+
+      <div id="security-modal" class="security-modal hidden" role="dialog" aria-modal="true" aria-labelledby="security-title">
+        <div class="security-card">
+          <div class="security-head">
+            <h2 id="security-title">Authenticator security</h2>
+            <button type="button" id="security-close" class="ghost tiny" aria-label="Close">×</button>
+          </div>
+          <p id="security-status" class="hint">Checking current authentication method…</p>
+          <div id="security-start">
+            <p>Use any standards-based TOTP app, including Google Authenticator or LastPass Authenticator.</p>
+            <button type="button" id="totp-start" class="accent-btn">Set up authenticator</button>
+          </div>
+          <div id="security-enroll" class="hidden">
+            <p>Add an account manually in your authenticator app:</p>
+            <dl class="security-details">
+              <dt>Issuer</dt><dd>Nullink</dd>
+              <dt>Account</dt><dd id="totp-account">owner</dd>
+              <dt>Setup key</dt><dd><code id="totp-secret"></code></dd>
+              <dt>Type</dt><dd>Time based · 6 digits · SHA-1 · 30 seconds</dd>
+            </dl>
+            <label>Enter the code shown by the app
+              <input id="totp-confirm-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••" />
+            </label>
+            <button type="button" id="totp-confirm" class="accent-btn">Confirm and enable</button>
+          </div>
+          <div id="security-recovery" class="hidden">
+            <p><strong>Save these recovery codes now.</strong> Each works once and they will not be shown again.</p>
+            <pre id="recovery-codes" class="recovery-codes"></pre>
+            <button type="button" id="recovery-copy" class="ghost">Copy recovery codes</button>
+          </div>
+          <div id="security-disable" class="hidden">
+            <p>Authenticator login is enabled. Disabling it returns Nullink to its current server PIN.</p>
+            <label>Current authenticator code
+              <input id="totp-disable-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••" />
+            </label>
+            <button type="button" id="totp-disable" class="ghost">Disable authenticator</button>
+          </div>
+          <p id="security-error" class="error" role="alert"></p>
+        </div>
+      </div>
       <button type="button" id="nl-roster-rail" class="nl-collapsed-rail hidden" aria-label="Expand roster" title="Show roster">Roster</button>
 
       <div id="sidebar-backdrop" class="sidebar-backdrop hidden" aria-hidden="true"></div>

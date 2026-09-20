@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import base64
 import hashlib
 import hmac
 import io
@@ -29,6 +30,7 @@ UPLOADS = BASE / "uploads"
 VAULT = DATA / "files"
 SCRATCH = BASE / "scratch"
 OTP_FILE = SECRETS / "otp.json"
+TOTP_FILE = SECRETS / "totp.json"
 SESSION_SECRET_FILE = SECRETS / "session_secret.txt"
 MESSAGES_FILE = DATA / "messages.jsonl"
 LAST_HANDLED = DATA / ".last-handled"
@@ -58,6 +60,9 @@ PORT = 8766
 SESSION_TTL_SEC = 24 * 3600
 MAX_FAILS = 5
 LOCK_SEC = 15 * 60
+TOTP_STEP_SEC = 30
+TOTP_DIGITS = 6
+TOTP_WINDOW = 1
 COOKIE_NAME = "morc_session"
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_PLAYGROUND_BYTES = 25 * 1024 * 1024
@@ -874,6 +879,93 @@ def load_otp() -> dict | None:
         return json.loads(OTP_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+
+
+def load_totp() -> dict | None:
+    if not TOTP_FILE.exists():
+        return None
+    try:
+        data = json.loads(TOTP_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def save_totp(data: dict) -> None:
+    TOTP_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    TOTP_FILE.chmod(0o600)
+
+
+def totp_enabled() -> bool:
+    data = load_totp()
+    return bool(data and data.get("enabled") and data.get("secret"))
+
+
+def generate_totp_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def _totp_value(secret: str, counter: int) -> str:
+    padded = secret.upper() + "=" * ((8 - len(secret) % 8) % 8)
+    key = base64.b32decode(padded, casefold=True)
+    digest = hmac.new(key, int(counter).to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    binary = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return str(binary % (10 ** TOTP_DIGITS)).zfill(TOTP_DIGITS)
+
+
+def verify_totp(code: str, config: dict, now: float | None = None, consume: bool = False) -> bool:
+    code = str(code or "").replace(" ", "").strip()
+    if not (code.isdigit() and len(code) == TOTP_DIGITS):
+        return False
+    current = int((time.time() if now is None else now) // TOTP_STEP_SEC)
+    last = int(config.get("last_counter", -1))
+    for delta in range(-TOTP_WINDOW, TOTP_WINDOW + 1):
+        counter = current + delta
+        if consume and counter <= last:
+            continue
+        if hmac.compare_digest(_totp_value(str(config.get("secret") or ""), counter), code):
+            if consume:
+                config["last_counter"] = counter
+                save_totp(config)
+            return True
+    return False
+
+
+def _recovery_hash(code: str) -> str:
+    return hmac.new(session_secret(), str(code).strip().upper().encode(), hashlib.sha256).hexdigest()
+
+
+def consume_recovery_code(code: str, config: dict) -> bool:
+    candidate = _recovery_hash(code)
+    hashes = list(config.get("recovery_hashes") or [])
+    for idx, stored in enumerate(hashes):
+        if hmac.compare_digest(candidate, str(stored)):
+            hashes.pop(idx)
+            config["recovery_hashes"] = hashes
+            save_totp(config)
+            return True
+    return False
+
+
+def make_recovery_codes(count: int = 8) -> list[str]:
+    codes = []
+    for _ in range(count):
+        raw = base64.b32encode(secrets.token_bytes(7)).decode("ascii").rstrip("=")[:10]
+        codes.append(f"{raw[:5]}-{raw[5:]}")
+    return codes
+
+
+def totp_uri(secret: str, account: str = "owner") -> str:
+    label = urllib.parse.quote(f"Nullink:{account}", safe="")
+    params = urllib.parse.urlencode({
+        "secret": secret,
+        "issuer": "Nullink",
+        "algorithm": "SHA1",
+        "digits": str(TOTP_DIGITS),
+        "period": str(TOTP_STEP_SEC),
+    })
+    return f"otpauth://totp/{label}?{params}"
 
 
 def load_rate() -> dict:
@@ -2170,6 +2262,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("tokens.css", "text/css; charset=utf-8")
         if path == "/health":
             return self._json(200, {"ok": True, "service": "nullink", "port": PORT, "pm": True})
+        if path == "/api/auth/method":
+            config = load_totp() or {}
+            response = {
+                "method": "both" if totp_enabled() else "pin",
+                "totp_enabled": totp_enabled(),
+            }
+            if verify_session(self._cookie_token()):
+                response["recovery_codes_remaining"] = len(config.get("recovery_hashes") or []) if totp_enabled() else 0
+            return self._json(200, response)
 
         if path == "/api/ping":
             # Legacy unauthenticated wake for box watchers when no Authorization.
@@ -2400,6 +2501,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._auth_verify()
         if path == "/api/auth/logout":
             return self._auth_logout()
+        if path == "/api/auth/totp/setup":
+            return self._totp_setup()
+        if path == "/api/auth/totp/confirm":
+            return self._totp_confirm()
+        if path == "/api/auth/totp/disable":
+            return self._totp_disable()
         if path == "/api/auth/tokens":
             return self._create_token()
         if path == "/api/messages":
@@ -3692,22 +3799,31 @@ class Handler(BaseHTTPRequestHandler):
                 })
 
             body = self._read_json()
-            pin = str(body.get("pin", "")).strip()
-            if not (pin.isdigit() and len(pin) == 6):
-                return self._json(400, {"error": "invalid_pin_format", "message": "Enter a 6-digit PIN."})
-
-            otp = load_otp()
-            if not otp:
-                return self._json(503, {"error": "no_otp", "message": "No PIN set yet. Ask for a new Nullink PIN."})
-
-            expires = otp.get("expires_at")
-            if expires and float(expires) < now:
-                return self._json(401, {"error": "expired", "message": "PIN expired. Ask for a new Nullink PIN."})
-
-            ok = hmac.compare_digest(
-                hash_pin(pin, otp["salt"]),
-                otp["pin_hash"],
-            )
+            code = str(body.get("code", body.get("pin", ""))).strip()
+            config = load_totp()
+            using_totp = bool(config and config.get("enabled") and config.get("secret"))
+            if using_totp:
+                if not code:
+                    return self._json(400, {"error": "invalid_code_format", "message": "Enter an authenticator or recovery code."})
+                ok = verify_totp(code, config, now=now, consume=True)
+                if not ok and "-" in code:
+                    ok = consume_recovery_code(code, config)
+                # TOTP is offered alongside the existing rotating PIN. A valid,
+                # unexpired PIN remains a separate first-class login option.
+                if not ok and code.isdigit() and len(code) == 6:
+                    otp = load_otp()
+                    if otp and (not otp.get("expires_at") or float(otp["expires_at"]) >= now):
+                        ok = hmac.compare_digest(hash_pin(code, otp["salt"]), otp["pin_hash"])
+            else:
+                if not (code.isdigit() and len(code) == 6):
+                    return self._json(400, {"error": "invalid_pin_format", "message": "Enter a 6-digit PIN."})
+                otp = load_otp()
+                if not otp:
+                    return self._json(503, {"error": "no_otp", "message": "No PIN set yet. Ask for a new Nullink PIN."})
+                expires = otp.get("expires_at")
+                if expires and float(expires) < now:
+                    return self._json(401, {"error": "expired", "message": "PIN expired. Ask for a new Nullink PIN."})
+                ok = hmac.compare_digest(hash_pin(code, otp["salt"]), otp["pin_hash"])
             if not ok:
                 fails = int(rate.get("fails", 0)) + 1
                 rate["fails"] = fails
@@ -3723,8 +3839,8 @@ class Handler(BaseHTTPRequestHandler):
                 save_rate(rate)
                 left = MAX_FAILS - fails
                 return self._json(401, {
-                    "error": "wrong_pin",
-                    "message": f"Incorrect PIN. {left} attempt(s) left.",
+                    "error": "wrong_code" if using_totp else "wrong_pin",
+                    "message": f"Incorrect code. {left} attempt(s) left.",
                     "attempts_left": left,
                 })
 
@@ -3746,6 +3862,69 @@ class Handler(BaseHTTPRequestHandler):
     def _auth_logout(self) -> None:
         cookie = f"{COOKIE_NAME}=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax"
         return self._json(200, {"ok": True}, [("Set-Cookie", cookie)])
+
+    def _totp_setup(self) -> None:
+        if not self._require_auth():
+            return
+        if totp_enabled():
+            return self._json(409, {"error": "totp_already_enabled"})
+        body = self._read_json()
+        account = str(body.get("account") or "owner").strip()[:80] or "owner"
+        secret = generate_totp_secret()
+        save_totp({
+            "enabled": False,
+            "secret": secret,
+            "account": account,
+            "created_at": time.time(),
+            "last_counter": -1,
+            "recovery_hashes": [],
+        })
+        return self._json(200, {
+            "ok": True,
+            "secret": secret,
+            "uri": totp_uri(secret, account),
+            "issuer": "Nullink",
+            "account": account,
+            "algorithm": "SHA1",
+            "digits": TOTP_DIGITS,
+            "period": TOTP_STEP_SEC,
+        })
+
+    def _totp_confirm(self) -> None:
+        if not self._require_auth():
+            return
+        body = self._read_json()
+        code = str(body.get("code") or "").strip()
+        config = load_totp()
+        if not config or config.get("enabled") or not config.get("secret"):
+            return self._json(409, {"error": "setup_not_pending"})
+        if not verify_totp(code, config, consume=False):
+            return self._json(401, {"error": "wrong_code", "message": "That authenticator code did not match."})
+        recovery_codes = make_recovery_codes()
+        config["enabled"] = True
+        config["enabled_at"] = time.time()
+        config["last_counter"] = -1
+        config["recovery_hashes"] = [_recovery_hash(code) for code in recovery_codes]
+        save_totp(config)
+        save_rate({"fails": 0, "locked_until": 0})
+        return self._json(200, {"ok": True, "recovery_codes": recovery_codes})
+
+    def _totp_disable(self) -> None:
+        if not self._require_auth():
+            return
+        body = self._read_json()
+        code = str(body.get("code") or "").strip()
+        config = load_totp()
+        if not config or not config.get("enabled"):
+            return self._json(409, {"error": "totp_not_enabled"})
+        if not verify_totp(code, config, consume=False):
+            return self._json(401, {"error": "wrong_code", "message": "A current authenticator code is required."})
+        try:
+            TOTP_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        save_rate({"fails": 0, "locked_until": 0})
+        return self._json(200, {"ok": True, "method": "pin"})
 
     def _post_message(self) -> None:
         if not self._require_api_auth(["messages:write"]):

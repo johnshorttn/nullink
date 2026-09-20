@@ -63,6 +63,10 @@ body {
   font-weight: 700; font-size: 1.4rem; color: #0b1020;
 }
 .auth-card h1 { margin: 0 0 8px; font-size: 1.35rem; font-weight: 600; }
+.auth-methods { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 14px 0 10px; padding: 4px; border: 1px solid var(--border); border-radius: 12px; }
+.auth-methods.hidden { display: none; }
+.auth-method { border: 0; border-radius: 8px; padding: 9px 10px; background: transparent; color: var(--muted); cursor: pointer; }
+.auth-method.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
 .sub { color: var(--muted); margin: 0 0 24px; font-size: .95rem; line-height: 1.45; }
 #pin-form { display: flex; flex-direction: column; gap: 12px; }
 #pin-input {
@@ -350,7 +354,37 @@ body {
 .ghost.tiny { padding: 4px 8px; font-size: .85rem; line-height: 1; }
 .upload-btn { cursor: pointer; display: inline-flex; align-items: center; }
 
-#logout-btn { flex-shrink: 0; margin-top: auto; }
+#security-btn { flex-shrink: 0; margin-top: auto; }
+#logout-btn { flex-shrink: 0; }
+
+.security-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, .72);
+}
+.security-modal.hidden { display: none; }
+.security-card {
+  width: min(560px, 100%);
+  max-height: 90vh;
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .45);
+}
+.security-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.security-head h2 { margin: 0; }
+.security-details { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; }
+.security-details dt { color: var(--muted); }
+.security-details dd { margin: 0; overflow-wrap: anywhere; }
+.security-card label { display: grid; gap: 6px; margin: 16px 0; color: var(--muted); }
+.security-card input { min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); }
+.recovery-codes { padding: 14px; border-radius: 10px; background: var(--bg); color: var(--text); line-height: 1.7; user-select: all; }
 
 .main {
   display: flex;

@@ -4,11 +4,33 @@
   const pinForm = document.getElementById("pin-form");
   const pinInput = document.getElementById("pin-input");
   const authError = document.getElementById("auth-error");
+  const authHelp = document.getElementById("auth-help");
+  const authMethods = document.getElementById("auth-methods");
+  const authMethodTotp = document.getElementById("auth-method-totp");
+  const authMethodPin = document.getElementById("auth-method-pin");
   const messagesEl = document.getElementById("messages");
   const compose = document.getElementById("compose");
   const composeInput = document.getElementById("compose-input");
   const rosterRoot = document.getElementById("roster-root");
   const logoutBtn = document.getElementById("logout-btn");
+  const securityBtn = document.getElementById("security-btn");
+  const securityModal = document.getElementById("security-modal");
+  const securityClose = document.getElementById("security-close");
+  const securityStatus = document.getElementById("security-status");
+  const securityStart = document.getElementById("security-start");
+  const securityEnroll = document.getElementById("security-enroll");
+  const securityRecovery = document.getElementById("security-recovery");
+  const securityDisable = document.getElementById("security-disable");
+  const securityError = document.getElementById("security-error");
+  const totpStart = document.getElementById("totp-start");
+  const totpAccount = document.getElementById("totp-account");
+  const totpSecret = document.getElementById("totp-secret");
+  const totpConfirmCode = document.getElementById("totp-confirm-code");
+  const totpConfirm = document.getElementById("totp-confirm");
+  const totpDisableCode = document.getElementById("totp-disable-code");
+  const totpDisable = document.getElementById("totp-disable");
+  const recoveryCodes = document.getElementById("recovery-codes");
+  const recoveryCopy = document.getElementById("recovery-copy");
   const chatTitle = document.getElementById("chat-title");
   const statusDot = document.getElementById("status-dot");
   const searchInput = document.getElementById("search-input");
@@ -1257,23 +1279,63 @@ btnSplit.addEventListener("click", () => {
       const r = await fetch("/api/me", { credentials: "include" });
       const d = await r.json();
       if (d.authenticated) showApp();
-      else showAuth();
+      else {
+        showAuth();
+        updateAuthMethod();
+      }
     } catch {
       showAuth();
       authError.textContent = "Cannot reach bridge server.";
     }
   }
 
+  async function updateAuthMethod() {
+    try {
+      const r = await fetch("/api/auth/method", { credentials: "include" });
+      const d = await r.json();
+      const enabled = !!d.totp_enabled;
+      authMethods.classList.toggle("hidden", !enabled);
+      selectAuthMethod(enabled ? "totp" : "pin");
+    } catch (_) {}
+  }
+
+  function selectAuthMethod(method) {
+    const useTotp = method === "totp";
+    pinInput.dataset.method = useTotp ? "totp" : "pin";
+    pinInput.value = "";
+    pinInput.maxLength = useTotp ? 12 : 6;
+    pinInput.placeholder = useTotp ? "Authenticator code" : "6-digit PIN";
+    authHelp.textContent = useTotp
+      ? "Enter the code from Google, LastPass, or another authenticator app. A recovery code also works."
+      : "Enter the temporary 6-digit PIN from Nullink chat.";
+    authMethodTotp.classList.toggle("active", useTotp);
+    authMethodPin.classList.toggle("active", !useTotp);
+    authMethodTotp.setAttribute("aria-selected", String(useTotp));
+    authMethodPin.setAttribute("aria-selected", String(!useTotp));
+    authError.textContent = "";
+    pinInput.focus();
+  }
+
+  authMethodTotp.addEventListener("click", () => selectAuthMethod("totp"));
+  authMethodPin.addEventListener("click", () => selectAuthMethod("pin"));
+
   pinInput.addEventListener("input", () => {
-    pinInput.value = pinInput.value.replace(/\D/g, "").slice(0, 6);
+    if (pinInput.dataset.method === "totp") {
+      pinInput.value = pinInput.value.replace(/[^0-9a-fA-F-]/g, "").slice(0, 12).toUpperCase();
+    } else {
+      pinInput.value = pinInput.value.replace(/\D/g, "").slice(0, 6);
+    }
     authError.textContent = "";
   });
 
   pinForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const pin = pinInput.value.trim();
-    if (pin.length !== 6) {
-      authError.textContent = "Enter a 6-digit PIN.";
+    const isRecovery = /^[A-Z2-7]{5}-[A-Z2-7]{5}$/i.test(pin);
+    if (!(/^\d{6}$/.test(pin) || (pinInput.dataset.method === "totp" && isRecovery))) {
+      authError.textContent = pinInput.dataset.method === "totp"
+        ? "Enter a 6-digit authenticator code or recovery code."
+        : "Enter a 6-digit PIN.";
       return;
     }
     authError.textContent = "";
@@ -1282,7 +1344,7 @@ btnSplit.addEventListener("click", () => {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pin }),
+        body: JSON.stringify({ code: pin }),
       });
       const d = await r.json();
       if (!r.ok) {
@@ -1299,6 +1361,80 @@ btnSplit.addEventListener("click", () => {
   logoutBtn.addEventListener("click", async () => {
     await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     showAuth();
+  });
+
+  async function refreshSecurity() {
+    securityError.textContent = "";
+    const r = await fetch("/api/auth/method", { credentials: "include" });
+    const d = await r.json();
+    securityStatus.textContent = d.totp_enabled
+      ? `Authenticator and PIN login enabled · ${d.recovery_codes_remaining} recovery codes remaining`
+      : "Authenticator login is not enabled.";
+    securityStart.classList.toggle("hidden", !!d.totp_enabled);
+    securityDisable.classList.toggle("hidden", !d.totp_enabled);
+    securityEnroll.classList.add("hidden");
+    securityRecovery.classList.add("hidden");
+  }
+
+  securityBtn.addEventListener("click", async () => {
+    securityModal.classList.remove("hidden");
+    try { await refreshSecurity(); } catch (_) { securityError.textContent = "Could not load security settings."; }
+  });
+  securityClose.addEventListener("click", () => securityModal.classList.add("hidden"));
+  securityModal.addEventListener("click", (e) => {
+    if (e.target === securityModal) securityModal.classList.add("hidden");
+  });
+
+  totpStart.addEventListener("click", async () => {
+    securityError.textContent = "";
+    const r = await fetch("/api/auth/totp/setup", {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: "owner" }),
+    });
+    const d = await r.json();
+    if (!r.ok) return securityError.textContent = d.message || "Could not start setup.";
+    totpAccount.textContent = d.account;
+    totpSecret.textContent = d.secret.match(/.{1,4}/g).join(" ");
+    securityStart.classList.add("hidden");
+    securityEnroll.classList.remove("hidden");
+    totpConfirmCode.focus();
+  });
+
+  totpConfirmCode.addEventListener("input", () => {
+    totpConfirmCode.value = totpConfirmCode.value.replace(/\D/g, "").slice(0, 6);
+  });
+  totpConfirm.addEventListener("click", async () => {
+    securityError.textContent = "";
+    const r = await fetch("/api/auth/totp/confirm", {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: totpConfirmCode.value }),
+    });
+    const d = await r.json();
+    if (!r.ok) return securityError.textContent = d.message || "Code did not match.";
+    recoveryCodes.textContent = d.recovery_codes.join("\n");
+    securityEnroll.classList.add("hidden");
+    securityRecovery.classList.remove("hidden");
+    securityStatus.textContent = "Authenticator login enabled alongside PIN login.";
+  });
+
+  recoveryCopy.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(recoveryCodes.textContent);
+    recoveryCopy.textContent = "Copied";
+  });
+
+  totpDisableCode.addEventListener("input", () => {
+    totpDisableCode.value = totpDisableCode.value.replace(/\D/g, "").slice(0, 6);
+  });
+  totpDisable.addEventListener("click", async () => {
+    securityError.textContent = "";
+    const r = await fetch("/api/auth/totp/disable", {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: totpDisableCode.value }),
+    });
+    const d = await r.json();
+    if (!r.ok) return securityError.textContent = d.message || "Could not disable authenticator login.";
+    totpDisableCode.value = "";
+    await refreshSecurity();
   });
 
   const ROSTER_COLLAPSE_KEY = "nullink.roster.collapsed";
