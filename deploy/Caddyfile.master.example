@@ -1,0 +1,5 @@
+# Inside the existing Nullink site, before catch-all routes.
+# handle_path strips /master so upstream receives /mcp.
+handle_path /master/* {
+    reverse_proxy 127.0.0.1:8768
+}
