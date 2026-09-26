@@ -13,6 +13,8 @@ import mcp_http_server as gateway
 class GatewayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.original_token = gateway.adapter.TOKEN
+        gateway.adapter.TOKEN = "nlk_test_token"
         cls.server = gateway.ThreadingHTTPServer(("127.0.0.1", 0), gateway.MCPHandler)
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -20,6 +22,7 @@ class GatewayTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        gateway.adapter.TOKEN = cls.original_token
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join(timeout=2)
@@ -36,6 +39,10 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.request({"jsonrpc": "2.0", "id": 1, "method": "ping"}, token=None)
         self.assertEqual(caught.exception.code, 401)
+
+    def test_malformed_params(self):
+        with self.request({"jsonrpc": "2.0", "id": 4, "method": "initialize", "params": [1]}) as response:
+            self.assertEqual(json.load(response)["error"]["code"], -32602)
 
     def test_initialize(self):
         payload = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}
@@ -64,3 +71,4 @@ class GatewayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
