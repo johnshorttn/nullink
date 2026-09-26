@@ -1,0 +1,6 @@
+{
+  "issuer": "https://nullink.216.158.238.236.sslip.io/connect/oauth",
+  "resource": "https://nullink.216.158.238.236.sslip.io/connect/mcp",
+  "redirect_uris": ["https://chatgpt.com/connector_platform_oauth_redirect"],
+  "database": "/var/lib/nullink-oauth/oauth.sqlite3"
+}

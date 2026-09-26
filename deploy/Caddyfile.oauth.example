@@ -1,0 +1,12 @@
+# Add these routes INSIDE the existing HTTPS site before its catch-all.
+# Preserve the paths; do not use handle_path for OAuth routes.
+handle /connect/* {
+    reverse_proxy 127.0.0.1:8769
+}
+handle /.well-known/oauth-protected-resource/connect/mcp {
+    reverse_proxy 127.0.0.1:8769
+}
+handle /.well-known/oauth-authorization-server/connect/oauth {
+    reverse_proxy 127.0.0.1:8769
+}
+# Keep /master/* and legacy /mcp handlers unchanged.
