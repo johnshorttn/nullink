@@ -1,0 +1,27 @@
+[Unit]
+Description=Nullink owner-approved OAuth MCP gateway
+After=nullink-master-worker.service
+Requires=nullink-master-worker.service
+
+[Service]
+Type=simple
+User=nullink-master
+Group=nullink-master
+WorkingDirectory=/opt/nullink-master
+Environment=MASTER_OAUTH_CONFIG=/etc/nullink-master/oauth.json
+Environment=NULLINK_TOKEN_FILE=/etc/nullink-master/chat-token
+Environment=NULLINK_URL=http://127.0.0.1:8766
+Environment=MASTER_OAUTH_PORT=8769
+ExecStart=/usr/bin/python3 /opt/nullink-master/oauth_gateway.py
+StateDirectory=nullink-oauth
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
