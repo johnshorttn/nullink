@@ -2072,6 +2072,30 @@ def label_folder(label_ids: list[str]) -> str:
     return "inbox"
 
 
+def collect_portal_status() -> dict:
+    """Physical host RAM and the filesystem holding app data; no account quotas."""
+    memory = {}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        key, _, value = line.partition(":")
+        if key in {"MemTotal", "MemAvailable"}:
+            memory[key] = int(value.split()[0]) * 1024
+    total = memory["MemTotal"]
+    available = memory["MemAvailable"]
+    if total <= 0 or not 0 <= available <= total:
+        raise ValueError("invalid memory metrics")
+    disk = shutil.disk_usage(DATA)
+    if disk.total <= 0 or not 0 <= disk.used <= disk.total:
+        raise ValueError("invalid storage metrics")
+
+    def quantities(used, capacity):
+        return {"used_bytes": used, "total_bytes": capacity,
+                "percent": round(used / capacity * 100, 2)}
+
+    return {"ram": quantities(total - available, total),
+            "storage": quantities(disk.used, disk.total),
+            "timestamp": time.time()}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "Nullink/1.1"
 
@@ -2266,7 +2290,7 @@ class Handler(BaseHTTPRequestHandler):
             permitted = {
                 "GET": {"/", "/index.html", "/projects", "/app.js", "/style.css",
                         "/tokens.css", "/portal.css", "/portal.js", "/health",
-                        "/api/me", "/api/auth/method"},
+                        "/api/me", "/api/auth/method", "/api/portal/status"},
                 "POST": {"/api/auth/verify", "/api/auth/logout"},
             }
             if path not in permitted.get(self.command, set()):
@@ -2277,6 +2301,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urllib.parse.urlparse(self.path).path
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        if path == "/api/portal/status":
+            if not self.portal_host:
+                return self._json(404, {"error": "not_found"})
+            if not verify_session(self._cookie_token()):
+                return self._json(401, {"error": "unauthorized"})
+            try:
+                metrics = collect_portal_status()
+            except (OSError, ValueError, KeyError, IndexError):
+                return self._json(503, {"error": "status_unavailable"})
+            return self._json(200, metrics)
 
         if self.portal_host:
             authenticated = verify_session(self._cookie_token())

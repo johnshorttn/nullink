@@ -16,7 +16,24 @@
 <a class="card" href="https://storycast.nullverse.cloud"><span class="icon story" aria-hidden="true">S</span><span class="details"><h2>StoryCast</h2><p>A home for stories and listening.</p></span><span class="arrow" aria-hidden="true">↗</span></a>
 <article class="card upcoming" aria-disabled="true"><span class="icon" aria-hidden="true">A</span><div class="details"><h2>Axis <span class="badge">Coming soon</span></h2><p>Not deployed yet.</p></div></article>
 </div></section>
-<footer>Nullverse <span aria-hidden="true">·</span> A place for what’s next.</footer>
+<footer>
+<nav class="admin-links" aria-label="Administration and recovery">
+<a href="https://cockpit.216.158.238.236.sslip.io">VPS Admin · Cockpit ↗</a>
+<a href="https://recovery.216.158.238.236.sslip.io">Account recovery ↗</a>
+<a href="https://storycast.nullverse.cloud/admin">StoryCast Admin ↗</a>
+</nav>
+<p class="status-note">Each destination keeps its own authentication.</p>
+<section class="server-status" aria-labelledby="server-heading">
+<h2 id="server-heading">VPS server status</h2>
+<p class="status-note">Physical RAM and storage capacity · refreshed every 15 seconds while visible.</p>
+<div class="metrics">
+<div><label for="ram-progress">RAM <strong id="ram-value">Loading…</strong></label><progress id="ram-progress" max="100" value="0" aria-valuetext="Loading"></progress></div>
+<div><label for="storage-progress">Storage <strong id="storage-value">Loading…</strong></label><progress id="storage-progress" max="100" value="0" aria-valuetext="Loading"></progress></div>
+</div>
+<p class="status-note">Storage total is filesystem capacity, not a provider billing quota.</p>
+<p id="server-update" role="status" aria-live="polite">Loading server status…</p>
+</section>
+</footer>
 <p id="status" role="status"></p>
 </main>
 </body></html>
