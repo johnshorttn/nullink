@@ -1,0 +1,5 @@
+# Replace only the apex block; keep every other domain and service block.
+nullverse.cloud {
+    header Cache-Control "no-store"
+    reverse_proxy 127.0.0.1:8766
+}

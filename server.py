@@ -2248,9 +2248,46 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Credentials", "true")
         self.end_headers()
 
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        # Route by the actual authority only, never by forwarded host headers.
+        hosts = self.headers.get_all("Host", [])
+        authority = hosts[0].lower() if len(hosts) == 1 else ""
+        allowed = {"nullverse.cloud", "nullink.nullverse.cloud",
+                   "nullink.216.158.238.236.sslip.io", "localhost", "127.0.0.1"}
+        host, sep, port = authority.partition(":")
+        if host not in allowed or (sep and port not in {"80", "443", str(PORT)}):
+            self._json(421, {"error": "untrusted_host"})
+            return False
+        self.portal_host = host == "nullverse.cloud"
+        if self.portal_host:
+            path = urllib.parse.urlsplit(self.path).path
+            permitted = {
+                "GET": {"/", "/index.html", "/projects", "/app.js", "/style.css",
+                        "/tokens.css", "/portal.css", "/portal.js", "/health",
+                        "/api/me", "/api/auth/method"},
+                "POST": {"/api/auth/verify", "/api/auth/logout"},
+            }
+            if path not in permitted.get(self.command, set()):
+                self._json(404, {"error": "not_found"})
+                return False
+        return True
+
     def do_GET(self) -> None:
         path = urllib.parse.urlparse(self.path).path
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        if self.portal_host:
+            authenticated = verify_session(self._cookie_token())
+            if path in ("/", "/index.html") and authenticated:
+                return self._send(302, b"", extra_headers=[("Location", "/projects")])
+            if path == "/projects":
+                if not authenticated:
+                    return self._send(302, b"", extra_headers=[("Location", "/")])
+                return self._serve_static("portal.html", "text/html; charset=utf-8")
+            if path in ("/portal.css", "/portal.js"):
+                return self._serve_static(path[1:], "text/css" if path.endswith("css") else "application/javascript")
 
         if path in ("/", "/index.html"):
             return self._serve_static("index.html", "text/html; charset=utf-8")
@@ -3853,7 +3890,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SEC}"
             )
             proto = (self.headers.get("X-Forwarded-Proto") or "").lower()
-            if proto == "https":
+            if self.portal_host or proto == "https":
                 cookie += "; Secure"
             return self._json(200, {"ok": True, "expires_in": SESSION_TTL_SEC}, [
                 ("Set-Cookie", cookie),
@@ -3861,6 +3898,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_logout(self) -> None:
         cookie = f"{COOKIE_NAME}=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax"
+        if self.portal_host or self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+            cookie += "; Secure"
         return self._json(200, {"ok": True}, [("Set-Cookie", cookie)])
 
     def _totp_setup(self) -> None:

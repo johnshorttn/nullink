@@ -744,6 +744,10 @@
   }
 
   function showApp() {
+    if (location.hostname === "nullverse.cloud") {
+      location.replace("/projects");
+      return;
+    }
     authView.classList.add("hidden");
     chatView.classList.remove("hidden");
     loadSessions();
