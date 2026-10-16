@@ -87,6 +87,12 @@ class PhoneBridgeTests(unittest.TestCase):
             self.bridge.request_phone(device["id"], "read", "not_shared", "file_1", timeout=0.1)
         self.assertEqual(caught.exception.code, "folder_sharing_inactive")
 
+    def test_sharing_cannot_start_without_any_folders(self):
+        _, device = self.pair_and_share()
+        with self.assertRaises(PhoneBridgeError) as caught:
+            self.bridge.set_sharing(device["id"], True, [])
+        self.assertEqual(caught.exception.code, "no_shared_folders")
+
 
 if __name__ == "__main__":
     unittest.main()
