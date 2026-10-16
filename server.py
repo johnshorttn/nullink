@@ -1336,6 +1336,21 @@ def load_apps_config() -> dict:
             apps = data.get("apps") or []
             if not isinstance(apps, list):
                 apps = []
+            # Messages for Web must run in the VPS browser, inside Guacamole.
+            # Publish a dedicated Nullink entry that reuses the allowlisted,
+            # same-origin desktop connection instead of embedding Google in a
+            # work-PC browser frame. Keep this virtual entry out of apps.json.
+            if any(isinstance(app, dict) and app.get("id") == "desktop" for app in apps):
+                if not any(isinstance(app, dict) and app.get("id") == "messages" for app in apps):
+                    apps = list(apps) + [{
+                        "id": "messages",
+                        "title": "Google Messages",
+                        "url": "/desktop/",
+                        "kind": "path",
+                        "embed": "iframe",
+                        "enabled": True,
+                        "description": "Google Messages for Web inside the VPS Chrome session.",
+                    }]
             return {
                 "apps": apps,
                 "frame_ancestors_note": data.get("frame_ancestors_note")
