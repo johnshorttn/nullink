@@ -178,6 +178,8 @@ class PhoneBridge:
                 raise PhoneBridgeError("invalid_root_id")
             seen.add(root_id)
             cleaned.append({"id": root_id, "name": name or "Shared folder"})
+        if enabled and not cleaned:
+            raise PhoneBridgeError("no_shared_folders")
         with self._changed:
             device = self._devices.get(device_id)
             if not device:
@@ -238,7 +240,9 @@ class PhoneBridge:
         deadline = time.time() + max(0, min(float(timeout), 25.0))
         with self._changed:
             device = self._devices.get(device_id)
-            if not device or not device.get("sharing") or not self._root_allowed(device, str(device.get("roots", [{}])[0].get("id") or "")):
+            if (not device or not device.get("sharing") or not device.get("roots") or
+                    not any(self._root_allowed(device, str(root.get("id") or ""))
+                            for root in device.get("roots", []) if isinstance(root, dict))):
                 raise PhoneBridgeError("folder_sharing_inactive", 409)
             q = self._queues.setdefault(device_id, queue.Queue())
             while True:
