@@ -22,6 +22,8 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from phone_bridge import PhoneBridgeError, get_bridge
+
 BASE = Path(__file__).resolve().parent
 SECRETS = BASE / "secrets"
 DATA = BASE / "data"
@@ -67,6 +69,8 @@ COOKIE_NAME = "morc_session"
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_PLAYGROUND_BYTES = 25 * 1024 * 1024
 PLAYGROUND_DIR = BASE / "playground" / "chatgpt"
+PHONE_DATA_DIR = DATA / "phone"
+PHONE_STAGING_DIR = DATA / "phone_staging"
 CHATGPT_PLAYGROUND_LABEL = {
     "id": "chatgpt-playground",
     "name": "ChatGPT Playground",
@@ -2189,6 +2193,16 @@ class Handler(BaseHTTPRequestHandler):
         self._json(401, {"error": "unauthorized"})
         return False
 
+    def _phone_device_auth(self) -> dict | None:
+        device = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).authenticate(self._bearer_token())
+        if not device:
+            self._json(401, {"error": "unauthorized", "message": "invalid_phone_device_token"})
+            return None
+        return device
+
+    def _phone_error(self, error: PhoneBridgeError) -> None:
+        self._json(error.status, {"error": error.code})
+
     def _require_api_auth(self, scopes: list[str] | None = None) -> bool:
         """Cookie (full access) OR Bearer with required scopes."""
         # Distinguish missing Authorization Bearer vs invalid Bearer.
@@ -2271,6 +2285,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("index.html", "text/html; charset=utf-8")
         if path == "/app.js":
             return self._serve_static("app.js", "application/javascript; charset=utf-8")
+        if path == "/phone-drive.js":
+            return self._serve_static("phone-drive.js", "application/javascript; charset=utf-8")
         if path == "/style.css":
             return self._serve_static("style.css", "text/css; charset=utf-8")
         if path == "/tokens.css":
@@ -2459,6 +2475,65 @@ class Handler(BaseHTTPRequestHandler):
                 "frame_ancestors_note": cfg.get("frame_ancestors_note"),
             })
 
+        if path == "/phone-drive/":
+            return self._serve_static("phone-drive.html", "text/html; charset=utf-8")
+
+        if path == "/api/phone/devices":
+            if not self._require_auth():
+                return
+            return self._json(200, {"devices": get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).list_devices()})
+
+        if path == "/api/phone/commands/next":
+            device = self._phone_device_auth()
+            if not device:
+                return
+            wait = (qs.get("wait") or [20])[0]
+            try:
+                command = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).next_command(device["id"], float(wait))
+                return self._json(200, {"command": command})
+            except (ValueError, PhoneBridgeError) as e:
+                return self._phone_error(e if isinstance(e, PhoneBridgeError) else PhoneBridgeError("invalid_wait"))
+
+        if path == "/api/phone/browse":
+            if not self._require_auth():
+                return
+            device_id = (qs.get("device_id") or [""])[0]
+            root_id = (qs.get("root_id") or [""])[0]
+            document_id = (qs.get("document_id") or ["root"])[0]
+            try:
+                result = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).request_phone(
+                    device_id, "list", root_id, document_id, timeout=25)
+                return self._json(200, {"items": result["items"], "device_id": device_id,
+                                       "root_id": root_id, "document_id": document_id})
+            except PhoneBridgeError as e:
+                return self._phone_error(e)
+
+        if path == "/api/phone/staged":
+            if not self._require_auth():
+                return
+            bridge = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR)
+            return self._json(200, {"files": bridge.list_staged()})
+
+        m = re.match(r"^/api/phone/staged/([a-f0-9]{32})/download$", path)
+        if m:
+            if not self._require_auth():
+                return
+            item = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).consume_staged(m.group(1))
+            if not item:
+                return self._json(404, {"error": "staged_file_expired_or_downloaded"})
+            try:
+                body = item["path"].read_bytes()
+            except OSError:
+                return self._json(404, {"error": "staged_file_unavailable"})
+            finally:
+                try:
+                    item["path"].unlink(missing_ok=True)
+                except OSError:
+                    pass
+            name = urllib.parse.quote(item["name"], safe="")
+            headers = [("Content-Disposition", f"attachment; filename*=UTF-8''{name}")]
+            return self._send(200, body, item["mime"], headers)
+
         m = re.match(r"^/api/apps/proxy/([^/]+)(/.*)?$", path)
         if m:
             return self._apps_proxy(m.group(1), m.group(2) or "/")
@@ -2524,6 +2599,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._totp_disable()
         if path == "/api/auth/tokens":
             return self._create_token()
+        if path == "/api/phone/pairing-code":
+            if not self._require_auth():
+                return
+            return self._json(200, get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).create_pairing_code())
+        if path == "/api/phone/pair":
+            body = self._read_json()
+            try:
+                result = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).pair(body.get("code"), body.get("name"))
+                return self._json(201, result)
+            except PhoneBridgeError as e:
+                return self._phone_error(e)
+        if path == "/api/phone/share":
+            device = self._phone_device_auth()
+            if not device:
+                return
+            body = self._read_json()
+            try:
+                result = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).set_sharing(
+                    device["id"], bool(body.get("enabled")), body.get("roots") or [])
+                return self._json(200, {"device": result})
+            except PhoneBridgeError as e:
+                return self._phone_error(e)
         if path == "/api/messages":
             return self._post_message()
         if path == "/api/admin/set-otp":
@@ -2560,6 +2657,33 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/selection/label":
             return self._selection_label()
 
+        m = re.match(r"^/api/phone/stage$", path)
+        if m:
+            if not self._require_auth():
+                return
+            body = self._read_json()
+            device_id = str(body.get("device_id") or "")
+            root_id = str(body.get("root_id") or "")
+            document_id = str(body.get("document_id") or "")
+            try:
+                staged = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).request_phone(
+                    device_id, "read", root_id, document_id, timeout=30)
+                return self._json(201, {"file": staged})
+            except PhoneBridgeError as e:
+                return self._phone_error(e)
+
+        m = re.match(r"^/api/phone/commands/([a-f0-9]{32})/result$", path)
+        if m:
+            device = self._phone_device_auth()
+            if not device:
+                return
+            try:
+                get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).complete_command(
+                    device["id"], m.group(1), self._read_json())
+                return self._json(200, {"ok": True})
+            except PhoneBridgeError as e:
+                return self._phone_error(e)
+
         self._json(404, {"error": "not found"})
 
     def do_PATCH(self) -> None:
@@ -2587,6 +2711,27 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         # alias save
         path = urllib.parse.urlparse(self.path).path
+        m = re.match(r"^/api/phone/commands/([a-f0-9]{32})/file$", path)
+        if m:
+            device = self._phone_device_auth()
+            if not device:
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self._json(400, {"error": "invalid_content_length"})
+            from phone_bridge import MAX_STAGED_BYTES
+            if length < 0 or length > MAX_STAGED_BYTES:
+                return self._json(413, {"error": "file_too_large_or_empty", "max_bytes": MAX_STAGED_BYTES})
+            name = urllib.parse.unquote(self.headers.get("X-Phone-File-Name") or "phone-file")
+            mime = self.headers.get("X-Phone-File-Mime") or "application/octet-stream"
+            try:
+                body = self.rfile.read(length)
+                result = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).complete_file(
+                    device["id"], m.group(1), name, mime, body)
+                return self._json(201, {"file": result})
+            except PhoneBridgeError as e:
+                return self._phone_error(e)
         if path == "/api/files/save":
             return self._file_save()
         m = re.match(r"^/api/files/([^/]+)/content$", path)
@@ -2608,6 +2753,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         path = urllib.parse.urlparse(self.path).path
+        m = re.match(r"^/api/phone/devices/([a-f0-9]{32})$", path)
+        if m:
+            if not self._require_auth():
+                return
+            deleted = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).revoke(m.group(1))
+            return self._json(200 if deleted else 404, {"ok": deleted})
         m = re.match(r"^/api/auth/tokens/([^/]+)$", path)
         if m:
             return self._revoke_token(m.group(1))
