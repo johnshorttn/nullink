@@ -134,7 +134,10 @@ class MainActivity : Activity() {
             contentResolver.takePersistableUriPermission(uri, readFlag)
             val dir = DocumentFile.fromTreeUri(this, uri) ?: error("Folder could not be opened")
             val roots = readRoots()
-            if (roots.any { it.optString("uri") == uri.toString() }) {
+            val alreadySelected = (0 until roots.length()).any { index ->
+                roots.optJSONObject(index)?.optString("uri") == uri.toString()
+            }
+            if (alreadySelected) {
                 statusText.text = "That folder is already selected."; return
             }
             roots.put(JSONObject().put("id", UUID.randomUUID().toString().replace("-", ""))
