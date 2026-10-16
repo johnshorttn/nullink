@@ -601,6 +601,21 @@
         if (desk) openApp(desk.id);
         else if (appsCatalog && appsCatalog[0]) openApp(appsCatalog[0].id);
       });
+    } else if (tool === "messages") {
+      goMode("apps");
+      loadApps().then(() => {
+        const messages = (appsCatalog || []).find((a) => a.id === "messages");
+        if (messages) openApp(messages.id);
+        else {
+          if (appsTitle) appsTitle.textContent = "Google Messages";
+          if (appsMeta) appsMeta.textContent = "VPS Desktop is not configured in the Nullink app list.";
+          if (appsFrameWrap) appsFrameWrap.classList.add("hidden");
+          if (appsEmpty) {
+            appsEmpty.classList.remove("hidden");
+            appsEmpty.querySelector("p").textContent = "Add the allowlisted VPS Desktop app to enable Google Messages.";
+          }
+        }
+      });
     } else if (tool === "android") {
       goMode("apps");
       loadApps().then(() => {
@@ -2242,9 +2257,10 @@ btnSplit.addEventListener("click", () => {
     const wantsDesktop =
       app.id === "desktop" ||
       app.id === "gmail" ||
+      app.id === "messages" ||
       (app.embed_url || "").startsWith("/desktop");
     if (wantsDesktop) {
-      appsMeta.textContent = "Signing into desktop…";
+      appsMeta.textContent = app.id === "messages" ? "Connecting to VPS Chrome…" : "Signing into desktop…";
       fetch("/api/desktop/launch", { credentials: "include" })
         .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
         .then(({ ok, d }) => {
@@ -2253,7 +2269,9 @@ btnSplit.addEventListener("click", () => {
             appsFrame.src = app.embed_url;
             return;
           }
-          appsMeta.textContent = "Desktop (PIN session) · " + (d.username || "desk");
+          appsMeta.textContent = app.id === "messages"
+            ? "VPS Chrome · open messages.google.com/web and pair once"
+            : "Desktop (PIN session) · " + (d.username || "desk");
           appsFrame.src = d.embedUrl;
         })
         .catch(() => {
