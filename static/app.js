@@ -616,6 +616,15 @@
           }
         }
       });
+    } else if (tool === "phone-drive") {
+      goMode("apps");
+      activeAppId = null;
+      if (appsTitle) appsTitle.textContent = "Phone Drive";
+      if (appsMeta) appsMeta.textContent = "Read-only · live access · temporary downloads";
+      if (appsFrame) appsFrame.src = "/phone-drive/";
+      if (appsFrameWrap) appsFrameWrap.classList.remove("hidden");
+      if (appsEmpty) appsEmpty.classList.add("hidden");
+      if (btnAppsOpen) btnAppsOpen.disabled = true;
     } else if (tool === "android") {
       goMode("apps");
       loadApps().then(() => {
