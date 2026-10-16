@@ -6,6 +6,7 @@ on:
       - "android/phone-companion/**"
       - ".github/workflows/phone-companion.yml"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "android/phone-companion/**"
       - ".github/workflows/phone-companion.yml"
