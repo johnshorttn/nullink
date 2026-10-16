@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 38050)
-Total output lines: 4077
-
 #!/usr/bin/env python3
 """Nullink PM — OTP auth + chat bridge + labels/files/editor on port 8766."""
 from __future__ import annotations
@@ -1847,7 +1844,835 @@ def build_inbox_items() -> list[dict]:
             "kind": kind,
             "title": preview[:160],
             "ts": _ts_to_iso(data.get("ts")),
-…8050 tokens truncated…self._require_playground_access():
+            "session_id": "morc",
+            "href": href,
+            "scratch_id": sid or None,
+            "file_id": data.get("file_id"),
+        })
+
+    # Scratch: unanswered Ask Morc (pending=true) + awaiting Accept (reviewed, not accepted)
+    try:
+        for meta_path in sorted(SCRATCH.glob("*-meta.json")):
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            sid = str(meta.get("scratch_id") or meta_path.name.replace("-meta.json", ""))
+            name = str(meta.get("name") or sid)
+            if meta.get("pending") is True:
+                if sid in seen_scratch:
+                    continue
+                seen_scratch.add(sid)
+                add({
+                    "id": f"unanswered_ask:{sid}",
+                    "kind": "unanswered_ask",
+                    "title": f"Ask Morc awaiting reply · {name}",
+                    "ts": str(meta.get("updated_at") or iso_now()),
+                    "session_id": "morc",
+                    "href": f"#scratch/{sid}",
+                    "scratch_id": sid,
+                    "file_id": meta.get("file_id"),
+                })
+            elif (meta.get("reviewed_by") or meta.get("reviewed_at")) and not meta.get("accepted_at"):
+                add({
+                    "id": f"scratch_accept:{sid}",
+                    "kind": "scratch_accept",
+                    "title": f"Scratch awaiting Accept · {name}",
+                    "ts": str(meta.get("reviewed_at") or meta.get("updated_at") or iso_now()),
+                    "session_id": "morc",
+                    "href": f"#scratch/{sid}",
+                    "scratch_id": sid,
+                    "file_id": meta.get("file_id"),
+                })
+    except OSError:
+        pass
+
+    # Wake failures (unacknowledged)
+    state = load_wake_state()
+    for fail in list(state.get("failures") or [])[-5:]:
+        if not isinstance(fail, dict):
+            continue
+        fid = str(fail.get("id") or "")
+        if not fid:
+            continue
+        err = str(fail.get("error") or "wake failed")
+        add({
+            "id": f"wake_failure:{fid}",
+            "kind": "wake_failure",
+            "title": f"Wake failure · {err[:120]}",
+            "ts": str(fail.get("ts") or iso_now()),
+            "session_id": "morc",
+            "href": "#presence",
+        })
+
+    # Open tasks from quick-paste (F3)
+    for t in load_tasks():
+        if str(t.get("status") or "open") != "open":
+            continue
+        tid = str(t.get("id") or "")
+        if not tid:
+            continue
+        title = str(t.get("title") or t.get("body") or "Task")[:160]
+        add({
+            "id": f"task:{tid}",
+            "kind": "task",
+            "title": title,
+            "ts": str(t.get("updated_at") or t.get("created_at") or iso_now()),
+            "session_id": "morc",
+            "href": f"#task/{tid}",
+            "task_id": tid,
+            "label_id": t.get("label_id"),
+            "body": str(t.get("body") or "")[:400],
+        })
+
+    items.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+    return items
+
+
+def inbox_dismiss(item_id: str) -> bool:
+    ids = load_inbox_dismissed()
+    ids.add(str(item_id))
+    save_inbox_dismissed(ids)
+    return True
+
+
+def inbox_mark_handled(item_id: str) -> dict:
+    """Clear underlying pending/scratch/wake state and dismiss the item."""
+    iid = str(item_id)
+    cleared = []
+    if iid.startswith("pending.notify:"):
+        try:
+            if PENDING_NOTIFY.exists():
+                PENDING_NOTIFY.unlink()
+                cleared.append("pending.notify")
+        except OSError:
+            pass
+    elif iid.startswith("pending.ask:"):
+        try:
+            if PENDING_ASK.exists():
+                PENDING_ASK.unlink()
+                cleared.append("pending.ask")
+        except OSError:
+            pass
+    elif iid.startswith("pending.upload:"):
+        try:
+            if PENDING_UPLOAD.exists():
+                PENDING_UPLOAD.unlink()
+                cleared.append("pending.upload")
+        except OSError:
+            pass
+    elif iid.startswith("unanswered_ask:") or iid.startswith("scratch_accept:"):
+        sid = iid.split(":", 1)[1]
+        mp = SCRATCH / f"{sid}-meta.json"
+        if mp.exists():
+            try:
+                meta = json.loads(mp.read_text(encoding="utf-8"))
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta["pending"] = False
+                if iid.startswith("scratch_accept:"):
+                    meta["accepted_at"] = iso_now()
+                else:
+                    meta["handled_at"] = iso_now()
+                mp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                cleared.append(sid)
+            except (OSError, json.JSONDecodeError):
+                pass
+        try:
+            if PENDING_ASK.exists():
+                data = _read_pending_json(PENDING_ASK) or {}
+                if str(data.get("scratch_id") or "") == sid:
+                    PENDING_ASK.unlink()
+                    cleared.append("pending.ask")
+        except OSError:
+            pass
+    elif iid.startswith("wake_failure:"):
+        wid = iid.split(":", 1)[1]
+        state = load_wake_state()
+        before = list(state.get("failures") or [])
+        state["failures"] = [f for f in before if not (isinstance(f, dict) and f.get("id") == wid)]
+        if len(state["failures"]) < len(before):
+            cleared.append(wid)
+        save_wake_state(state)
+    elif iid.startswith("task:"):
+        tid = iid.split(":", 1)[1]
+        updated = update_task(tid, {"status": "done"})
+        if updated:
+            cleared.append(tid)
+
+    inbox_dismiss(iid)
+    return {"ok": True, "cleared": cleared, "id": iid}
+
+
+def _post_webhook(payload: dict) -> None:
+    """POST one webhook with short retries; never delay the HTTP response."""
+    kind = str(payload.get("kind") or "")
+    try:
+        config = json.loads(WEBHOOK_CONFIG.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError) as exc:
+        _webhook_log(f"config read failed: {exc}")
+        _record_wake_failure(kind or "config", f"config read failed: {exc}")
+        return
+    if not isinstance(config, dict):
+        _webhook_log("config must be a JSON object")
+        return
+
+    if config.get("enabled") is not True:
+        return
+    url = str(config.get("url") or "").strip()
+    header_name = str(config.get("header_name") or "").strip()
+    header_value = str(config.get("header_value") or "")
+    if not url:
+        _webhook_log("config enabled but url is empty")
+        _record_wake_failure(kind or "config", "url empty")
+        return
+    if not header_name or not header_value:
+        _webhook_log("config enabled but header_name/header_value is incomplete")
+        _record_wake_failure(kind or "config", "header incomplete")
+        return
+
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    last_exc: Exception | None = None
+    for attempt in range(WEBHOOK_RETRIES):
+        try:
+            request = urllib.request.Request(
+                url,
+                data=body,
+                headers={"Content-Type": "application/json", header_name: header_value},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=WEBHOOK_TIMEOUT_SEC) as response:
+                status = getattr(response, "status", response.getcode())
+                if 200 <= status < 300:
+                    _record_wake_success(kind)
+                    return
+                last_exc = RuntimeError(f"HTTP {status}")
+                _webhook_log(f"POST returned HTTP {status} kind={kind} attempt={attempt + 1}")
+        except Exception as exc:
+            last_exc = exc
+            _webhook_log(f"POST error kind={kind} attempt={attempt + 1}: {exc}")
+        if attempt + 1 < WEBHOOK_RETRIES:
+            try:
+                time.sleep(WEBHOOK_BACKOFF_SEC[min(attempt, len(WEBHOOK_BACKOFF_SEC) - 1)])
+            except Exception:
+                pass
+    _record_wake_failure(kind, str(last_exc) if last_exc else "unknown")
+
+
+def fire_webhook(kind: str, hint: str) -> None:
+    payload = {
+        "source": "nullink",
+        "kind": kind,
+        "ts": iso_now(),
+        "hint": str(hint or "").replace("\r", " ").replace("\n", " ").strip()[:200],
+    }
+    threading.Thread(
+        target=_post_webhook,
+        args=(payload,),
+        name="nullink-webhook",
+        daemon=True,
+    ).start()
+
+
+
+def label_folder(label_ids: list[str]) -> str:
+    labels = {l["id"]: l for l in load_labels()}
+    for lid in label_ids:
+        if lid in labels:
+            return slugify(labels[lid]["name"]).lower() or "inbox"
+    return "inbox"
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "Nullink/1.1"
+
+    def log_message(self, fmt: str, *args) -> None:
+        msg = fmt % args if args else fmt
+        if "/api/auth/verify" in msg or "/api/admin/set-otp" in msg:
+            print(f"{self.address_string()} - [auth] {self.command} {self.path.split('?')[0]}")
+            return
+        print(f"{self.address_string()} - {msg}")
+
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {}
+
+    def _send(self, code: int, body: bytes, content_type: str = "application/json",
+              extra_headers: list[tuple[str, str]] | None = None) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if extra_headers:
+            for k, v in extra_headers:
+                self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, code: int, obj: dict | list, extra_headers: list[tuple[str, str]] | None = None) -> None:
+        self._send(code, json.dumps(obj).encode(), "application/json", extra_headers)
+
+    def _cookie_token(self) -> str | None:
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return None
+        c = SimpleCookie()
+        try:
+            c.load(raw)
+        except Exception:
+            return None
+        if COOKIE_NAME not in c:
+            return None
+        return c[COOKIE_NAME].value
+
+    def _bearer_token(self) -> str | None:
+        raw = self.headers.get("Authorization")
+        if not raw:
+            return None
+        parts = raw.split(None, 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return None
+        token = parts[1].strip()
+        return token or None
+
+    def _resolve_auth(self) -> dict | None:
+        """Precedence: Bearer, then morc_session cookie. Attaches self.auth."""
+        bearer = self._bearer_token()
+        if bearer is not None:
+            # Invalid/malformed Bearer must not fall through to cookie.
+            rec = lookup_bearer_token(bearer)
+            if not rec:
+                self.auth = None
+                return None
+            auth = {
+                "type": "bearer",
+                "token_id": rec.get("id"),
+                "name": rec.get("name"),
+                "scopes": list(rec.get("scopes") or []),
+                "sessions": list(rec.get("sessions") or []),
+                "token_prefix": rec.get("token_prefix"),
+            }
+            self.auth = auth
+            try:
+                touch_token_last_used(str(rec.get("id") or ""))
+            except Exception:
+                pass
+            return auth
+        if verify_session(self._cookie_token()):
+            auth = {"type": "session", "session_id": "morc_session"}
+            self.auth = auth
+            return auth
+        self.auth = None
+        return None
+
+    def _authed(self) -> bool:
+        return self._resolve_auth() is not None
+
+    def _require_auth(self) -> bool:
+        """Human cookie session required (UI / files / vault / admin)."""
+        auth = self._resolve_auth()
+        if auth and auth.get("type") == "session":
+            return True
+        if auth and auth.get("type") == "bearer":
+            self._json(403, {"error": "forbidden", "message": "cookie session required"})
+            return False
+        self._json(401, {"error": "unauthorized"})
+        return False
+
+    def _require_api_auth(self, scopes: list[str] | None = None) -> bool:
+        """Cookie (full access) OR Bearer with required scopes."""
+        # Distinguish missing Authorization Bearer vs invalid Bearer.
+        raw_auth = self.headers.get("Authorization")
+        if raw_auth is not None:
+            parts = raw_auth.split(None, 1)
+            if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+                self._json(401, {"error": "unauthorized", "message": "invalid_authorization"})
+                return False
+            auth = self._resolve_auth()
+            if not auth or auth.get("type") != "bearer":
+                self._json(401, {"error": "unauthorized", "message": "invalid_token"})
+                return False
+            if scopes:
+                have = set(auth.get("scopes") or [])
+                missing = [s for s in scopes if s not in have]
+                if missing:
+                    self._json(403, {"error": "forbidden", "missing_scopes": missing})
+                    return False
+            return True
+        auth = self._resolve_auth()
+        if auth and auth.get("type") == "session":
+            return True
+        self._json(401, {"error": "unauthorized"})
+        return False
+
+    def _session_allowed(self, session_id: str) -> bool:
+        auth = getattr(self, "auth", None) or self._resolve_auth()
+        if not auth:
+            return False
+        if auth.get("type") == "session":
+            return True
+        allowed = auth.get("sessions") or []
+        return str(session_id) in {str(s) for s in allowed}
+
+    def _require_session_access(self, session_id: str) -> bool:
+        if self._session_allowed(session_id):
+            return True
+        self._json(403, {"error": "forbidden", "message": "session_not_allowed", "session_id": session_id})
+        return False
+
+
+    def _require_playground_access(self) -> bool:
+        """Cookie humans: full playground access.
+
+        Bearer: must include session "chatgpt" in token.sessions (session
+        allow-list is the gate; playground:read/write scopes are optional
+        and not required). Other Bearer tokens get 403.
+        """
+        if not self._require_api_auth():
+            return False
+        auth = getattr(self, "auth", None) or {}
+        if auth.get("type") == "session":
+            return True
+        if auth.get("type") == "bearer":
+            allowed = {str(s) for s in (auth.get("sessions") or [])}
+            if "chatgpt" in allowed:
+                return True
+            self._json(403, {
+                "error": "forbidden",
+                "message": "chatgpt_session_required",
+                "detail": "Bearer token sessions must include chatgpt for playground",
+            })
+            return False
+        self._json(401, {"error": "unauthorized"})
+        return False
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Credentials", "true")
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        path = urllib.parse.urlparse(self.path).path
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        if path in ("/", "/index.html"):
+            return self._serve_static("index.html", "text/html; charset=utf-8")
+        if path == "/app.js":
+            return self._serve_static("app.js", "application/javascript; charset=utf-8")
+        if path == "/style.css":
+            return self._serve_static("style.css", "text/css; charset=utf-8")
+        if path == "/tokens.css":
+            return self._serve_static("tokens.css", "text/css; charset=utf-8")
+        if path == "/health":
+            return self._json(200, {"ok": True, "service": "nullink", "port": PORT, "pm": True})
+        if path == "/api/auth/method":
+            config = load_totp() or {}
+            response = {
+                "method": "both" if totp_enabled() else "pin",
+                "totp_enabled": totp_enabled(),
+            }
+            if verify_session(self._cookie_token()):
+                response["recovery_codes_remaining"] = len(config.get("recovery_hashes") or []) if totp_enabled() else 0
+            return self._json(200, response)
+
+        if path == "/api/ping":
+            # Legacy unauthenticated wake for box watchers when no Authorization.
+            # Bearer requires ping:read; cookie humans allowed.
+            raw_auth = self.headers.get("Authorization")
+            if raw_auth is not None:
+                if not self._require_api_auth(["ping:read"]):
+                    return
+                auth = getattr(self, "auth", None) or {}
+                allowed = auth.get("sessions") if auth.get("type") == "bearer" else None
+                has, reasons = ping_has_change_for_sessions(allowed)
+            elif self._cookie_token() and verify_session(self._cookie_token()):
+                has, reasons = ping_has_change()
+            else:
+                has, reasons = ping_has_change()
+            body = b"1" if has else b"0"
+            headers = [("X-Nullink-Reasons", ",".join(reasons))] if reasons else None
+            return self._send(200, body, "text/plain; charset=utf-8", headers)
+
+
+        if path == "/api/me":
+            if not self._require_api_auth():
+                return
+            auth = getattr(self, "auth", None) or {}
+            if auth.get("type") == "bearer":
+                return self._json(200, {
+                    "authenticated": True,
+                    "auth_type": "bearer",
+                    "token_id": auth.get("token_id"),
+                    "name": auth.get("name"),
+                    "scopes": auth.get("scopes") or [],
+                    "sessions": auth.get("sessions") or [],
+                })
+            return self._json(200, {
+                "authenticated": True,
+                "auth_type": "session",
+            })
+
+        if path == "/api/sessions":
+            if not self._require_api_auth(["sessions:read"]):
+                return
+            roster = load_roster()
+            sessions = flat_sessions_from_roster(roster)
+            auth = getattr(self, "auth", None) or {}
+            if auth.get("type") == "bearer":
+                allowed = {str(s) for s in (auth.get("sessions") or [])}
+                sessions = [s for s in sessions if str(s.get("id") or "") in allowed]
+                # Filter categories/bots similarly for cleanliness
+                cats = []
+                for cat in (roster.get("categories") or []):
+                    if not isinstance(cat, dict):
+                        continue
+                    bots = [b for b in (cat.get("bots") or [])
+                            if isinstance(b, dict) and str(b.get("id") or "") in allowed]
+                    if bots:
+                        c = dict(cat)
+                        c["bots"] = bots
+                        cats.append(c)
+                default = roster.get("default_session") or "morc"
+                if default not in allowed:
+                    default = next(iter(allowed), default)
+                return self._json(200, {
+                    "categories": cats,
+                    "default_session": default,
+                    "sessions": sessions,
+                })
+            return self._json(200, {
+                "categories": roster.get("categories") or [],
+                "default_session": roster.get("default_session") or "morc",
+                "sessions": sessions,
+            })
+
+        if path == "/api/auth/tokens":
+            return self._list_tokens()
+
+        if path == "/api/messages/stream":
+            return self._sse_messages(qs)
+
+        if path == "/api/messages":
+            if not self._require_api_auth(["messages:read"]):
+                return
+            after = 0
+            if "after" in qs:
+                try:
+                    after = int(qs["after"][0])
+                except (ValueError, IndexError):
+                    after = 0
+            limit = 50
+            if "limit" in qs:
+                try:
+                    limit = int(qs["limit"][0])
+                except (ValueError, IndexError):
+                    limit = 50
+            limit = max(1, min(100, limit))
+            sid = (qs.get("session") or ["morc"])[0]
+            if not self._require_session_access(sid):
+                return
+            msgs = read_messages(after_id=after)
+            msgs = [m for m in msgs if m.get("session_id", "morc") == sid]
+            # Normalize: ensure created_at for agent clients; keep ts for UI
+            for m in msgs:
+                if "created_at" not in m and m.get("ts"):
+                    m["created_at"] = m["ts"]
+            page = msgs[:limit]
+            has_more = len(msgs) > limit
+            if page:
+                next_after = max(int(m.get("id") or 0) for m in page)
+            else:
+                next_after = after
+            return self._json(200, {
+                "messages": page,
+                "next_after": next_after,
+                "has_more": has_more,
+            })
+
+        if path == "/api/labels":
+            if not self._require_auth():
+                return
+            return self._json(200, {"labels": load_labels()})
+
+        if path == "/api/files":
+            if not self._require_auth():
+                return
+            files = load_files()
+            label = (qs.get("label") or [None])[0]
+            if label:
+                files = [f for f in files if label in (f.get("labels") or [])]
+            return self._json(200, {"files": files})
+
+        m = re.match(r"^/api/files/([^/]+)/download$", path)
+        if m:
+            return self._file_download(m.group(1))
+
+        m = re.match(r"^/api/files/([^/]+)/content$", path)
+        if m:
+            return self._file_content(m.group(1))
+
+        m = re.match(r"^/api/files/([^/]+)$", path)
+        if m and m.group(1) not in ("upload", "preview", "ask-morc", "register", "save", "pull-scratch", "accept-scratch", "reject-scratch"):
+            return self._file_get(m.group(1))
+
+        m = re.match(r"^/api/scratch/([^/]+)/diff$", path)
+        if m:
+            return self._scratch_diff(m.group(1))
+
+        m = re.match(r"^/api/scratch/([^/]+)$", path)
+        if m:
+            return self._scratch_get(m.group(1))
+
+        m = re.match(r"^/api/session-memory/([^/]+)$", path)
+        if m:
+            return self._session_memory_get(m.group(1))
+
+        if path == "/api/presence":
+            if not self._require_auth():
+                return
+            return self._json(200, build_presence())
+
+        if path == "/api/inbox":
+            if not self._require_auth():
+                return
+            items = build_inbox_items()
+            return self._json(200, {"items": items, "count": len(items)})
+
+        if path == "/api/apps":
+            # Allowlist metadata is non-sensitive; proxy still requires auth.
+            cfg = load_apps_config()
+            apps = [public_app_view(a) for a in (cfg.get("apps") or []) if isinstance(a, dict)]
+            return self._json(200, {
+                "apps": apps,
+                "frame_ancestors_note": cfg.get("frame_ancestors_note"),
+            })
+
+        m = re.match(r"^/api/apps/proxy/([^/]+)(/.*)?$", path)
+        if m:
+            return self._apps_proxy(m.group(1), m.group(2) or "/")
+
+        if path == "/api/tasks":
+            if not self._require_auth():
+                return
+            status = (qs.get("status") or [None])[0]
+            tasks = load_tasks()
+            if status:
+                tasks = [t for t in tasks if str(t.get("status") or "open") == status]
+            return self._json(200, {"tasks": tasks, "count": len(tasks)})
+
+        m = re.match(r"^/api/tasks/([^/]+)$", path)
+        if m:
+            if not self._require_auth():
+                return
+            tid = urllib.parse.unquote(m.group(1))
+            task = next((t for t in load_tasks() if t.get("id") == tid), None)
+            if not task:
+                return self._json(404, {"error": "not_found"})
+            return self._json(200, {"task": task})
+
+        if path == "/api/vault":
+            if not self._require_auth():
+                return
+            q = (qs.get("q") or qs.get("query") or [None])[0]
+            items = list_vault_snippets(q)
+            return self._json(200, {"items": items, "count": len(items)})
+
+        m = re.match(r"^/api/vault/([^/]+)$", path)
+        if m:
+            if not self._require_auth():
+                return
+            vid = urllib.parse.unquote(m.group(1))
+            item = load_vault_snippet(vid)
+            if not item:
+                return self._json(404, {"error": "not_found"})
+            return self._json(200, {"item": item})
+
+
+        if path == "/api/playground/chatgpt":
+            return self._playground_list()
+
+        m = re.match(r"^/api/playground/chatgpt/([^/]+)$", path)
+        if m:
+            return self._playground_get(urllib.parse.unquote(m.group(1)))
+
+        self._json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:
+        path = urllib.parse.urlparse(self.path).path
+
+        if path == "/api/auth/verify":
+            return self._auth_verify()
+        if path == "/api/auth/logout":
+            return self._auth_logout()
+        if path == "/api/auth/totp/setup":
+            return self._totp_setup()
+        if path == "/api/auth/totp/confirm":
+            return self._totp_confirm()
+        if path == "/api/auth/totp/disable":
+            return self._totp_disable()
+        if path == "/api/auth/tokens":
+            return self._create_token()
+        if path == "/api/messages":
+            return self._post_message()
+        if path == "/api/admin/set-otp":
+            return self._admin_set_otp()
+        if path == "/api/admin/reply":
+            return self._admin_reply()
+
+        if path == "/api/labels":
+            return self._label_create()
+        if path == "/api/files/upload":
+            return self._file_upload()
+        if path == "/api/files/save":
+            return self._file_save()
+        if path == "/api/files/preview":
+            return self._file_preview()
+        if path == "/api/files/ask-morc":
+            return self._file_ask_morc()
+        if path == "/api/files/register":
+            return self._file_register()
+        if path == "/api/files/pull-scratch":
+            return self._pull_scratch()
+        if path == "/api/files/accept-scratch":
+            return self._accept_scratch()
+        if path == "/api/files/reject-scratch":
+            return self._reject_scratch()
+        if path == "/api/inbox/dismiss":
+            return self._inbox_dismiss()
+        if path == "/api/inbox/handled":
+            return self._inbox_handled()
+        if path == "/api/tasks":
+            return self._task_create()
+        if path == "/api/vault":
+            return self._vault_create()
+        if path == "/api/selection/label":
+            return self._selection_label()
+
+        self._json(404, {"error": "not found"})
+
+    def do_PATCH(self) -> None:
+        path = urllib.parse.urlparse(self.path).path
+        m = re.match(r"^/api/labels/([^/]+)$", path)
+        if m:
+            return self._label_update(m.group(1))
+        m = re.match(r"^/api/files/([^/]+)$", path)
+        if m:
+            return self._file_update_meta(m.group(1))
+        m = re.match(r"^/api/inbox/([^/]+)$", path)
+        if m:
+            return self._inbox_patch(m.group(1))
+        m = re.match(r"^/api/session-memory/([^/]+)$", path)
+        if m:
+            return self._session_memory_put(m.group(1), partial=True)
+        m = re.match(r"^/api/tasks/([^/]+)$", path)
+        if m:
+            return self._task_update(m.group(1))
+        m = re.match(r"^/api/vault/([^/]+)$", path)
+        if m:
+            return self._vault_update(m.group(1))
+        self._json(404, {"error": "not found"})
+
+    def do_PUT(self) -> None:
+        # alias save
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/files/save":
+            return self._file_save()
+        m = re.match(r"^/api/files/([^/]+)/content$", path)
+        if m:
+            body = self._read_json()
+            body["id"] = m.group(1)
+            # reuse save with injected body — stash via attribute
+            self._save_body_override = body
+            return self._file_save()
+        m = re.match(r"^/api/session-memory/([^/]+)$", path)
+        if m:
+            return self._session_memory_put(m.group(1), partial=False)
+
+        m = re.match(r"^/api/playground/chatgpt/([^/]+)$", path)
+        if m:
+            return self._playground_put(urllib.parse.unquote(m.group(1)))
+
+        self._json(404, {"error": "not found"})
+
+    def do_DELETE(self) -> None:
+        path = urllib.parse.urlparse(self.path).path
+        m = re.match(r"^/api/auth/tokens/([^/]+)$", path)
+        if m:
+            return self._revoke_token(m.group(1))
+        m = re.match(r"^/api/labels/([^/]+)$", path)
+        if m:
+            return self._label_delete(m.group(1))
+        m = re.match(r"^/api/files/([^/]+)$", path)
+        if m:
+            return self._file_delete(m.group(1))
+        m = re.match(r"^/api/tasks/([^/]+)$", path)
+        if m:
+            return self._task_delete(m.group(1))
+        m = re.match(r"^/api/vault/([^/]+)$", path)
+        if m:
+            return self._vault_delete(m.group(1))
+
+        m = re.match(r"^/api/playground/chatgpt/([^/]+)$", path)
+        if m:
+            return self._playground_delete(urllib.parse.unquote(m.group(1)))
+
+        self._json(404, {"error": "not found"})
+
+    # ---------- presence / inbox ----------
+    def _inbox_dismiss(self) -> None:
+        if not self._require_auth():
+            return
+        body = self._read_json()
+        iid = str(body.get("id") or "").strip()
+        if not iid:
+            return self._json(400, {"error": "id_required"})
+        inbox_dismiss(iid)
+        return self._json(200, {"ok": True, "id": iid})
+
+    def _inbox_handled(self) -> None:
+        if not self._require_auth():
+            return
+        body = self._read_json()
+        iid = str(body.get("id") or "").strip()
+        if not iid:
+            return self._json(400, {"error": "id_required"})
+        result = inbox_mark_handled(iid)
+        return self._json(200, result)
+
+    def _inbox_patch(self, item_id: str) -> None:
+        if not self._require_auth():
+            return
+        item_id = urllib.parse.unquote(str(item_id or "")).strip()
+        body = self._read_json()
+        action = str(body.get("action") or body.get("status") or "").strip().lower()
+        if action in ("dismiss", "dismissed"):
+            inbox_dismiss(item_id)
+            return self._json(200, {"ok": True, "id": item_id, "action": "dismiss"})
+        if action in ("handled", "done", "clear"):
+            return self._json(200, inbox_mark_handled(item_id))
+        return self._json(400, {"error": "action_required", "message": "Use action=dismiss|handled"})
+
+
+    # ---------- ChatGPT file playground ----------
+    def _playground_list(self) -> None:
+        if not self._require_playground_access():
+            return
+        return self._json(200, {"files": list_playground_files()})
+
+    def _playground_get(self, name: str) -> None:
+        if not self._require_playground_access():
             return
         dest = playground_resolve(name)
         if dest is None:
