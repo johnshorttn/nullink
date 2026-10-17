@@ -57,7 +57,7 @@ class MainActivity : Activity() {
         })
         baseField = field("Nullink HTTPS URL", prefs.getString("base_url", "https://nullink.216.158.238.236.sslip.io") ?: "")
         content.addView(baseField)
-        deviceNameField = field("Device name", prefs.getString("device_name", "Pixel phone") ?: "Pixel phone")
+        deviceNameField = field("Device name", prefs.getString("device_name", "Pixel phone (awake)") ?: "Pixel phone (awake)")
         content.addView(deviceNameField)
         pairCodeField = field("Six-digit one-time pairing code", "").apply {
             inputType = InputType.TYPE_CLASS_NUMBER
