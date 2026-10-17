@@ -75,6 +75,7 @@
     screenLastFrameAt = 0;
     $("screen-status").textContent = `Waiting for ${device.name || "phone"}. Start mirroring in the phone app and approve Android’s prompt.`;
     $("screen-placeholder").textContent = "Waiting for the phone to send its first frame…";
+    $("screen-placeholder").style.display = "block";
     $("screen-frame").style.display = "none";
     $("stop-screen").disabled = false;
     pollScreen();
@@ -97,6 +98,7 @@
     try {
       const query = new URLSearchParams({device_id:deviceId, after:String(screenSequence)});
       const response = await fetch(`/api/phone/screen/frame?${query}`, {credentials:"include", cache:"no-store"});
+      if (screenDeviceId !== deviceId) return;
       if (response.status === 200) {
         const nextUrl = URL.createObjectURL(await response.blob());
         const previousUrl = screenObjectUrl;
