@@ -1,5 +1,6 @@
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -25,12 +26,24 @@ class PhoneBridgeTests(unittest.TestCase):
 
     def test_pairing_code_is_single_use_and_token_is_only_returned_once(self):
         code = self.bridge.create_pairing_code()["code"]
+        self.assertRegex(code, r"^\d{6}$")
         paired = self.bridge.pair(code, "Pixel")
         self.assertTrue(paired["token"])
         self.assertNotIn("token", paired["device"])
         self.assertIsNotNone(self.bridge.authenticate(paired["token"]))
         with self.assertRaises(PhoneBridgeError):
             self.bridge.pair(code, "Second device")
+
+    def test_pairing_attempts_are_rate_limited(self):
+        code = self.bridge.create_pairing_code()["code"]
+        wrong_code = f"{(int(code) + 1) % 1_000_000:06d}"
+        for _ in range(8):
+            with self.assertRaises(PhoneBridgeError) as caught:
+                self.bridge.pair(wrong_code, "Pixel", "198.51.100.45")
+            self.assertEqual(caught.exception.code, "invalid_or_expired_pairing_code")
+        with self.assertRaises(PhoneBridgeError) as caught:
+            self.bridge.pair(code, "Pixel", "198.51.100.45")
+        self.assertEqual(caught.exception.code, "pair_rate_limited")
 
     def test_listing_is_live_request_and_returns_phone_items(self):
         paired, device = self.pair_and_share()
@@ -92,6 +105,41 @@ class PhoneBridgeTests(unittest.TestCase):
         with self.assertRaises(PhoneBridgeError) as caught:
             self.bridge.set_sharing(device["id"], True, [])
         self.assertEqual(caught.exception.code, "no_shared_folders")
+
+    def test_screen_frames_are_viewable_only_during_explicit_screen_session(self):
+        paired, device = self.pair_and_share()
+        jpeg = b"\xff\xd8\xfffake-jpeg-frame"
+        with self.assertRaises(PhoneBridgeError) as caught:
+            self.bridge.publish_screen_frame(device["id"], jpeg)
+        self.assertEqual(caught.exception.code, "screen_sharing_inactive")
+
+        self.bridge.set_screen_active(device["id"], True)
+        self.assertFalse(self.bridge.public_device(device["id"])["screen_active"])
+        sequence = self.bridge.publish_screen_frame(device["id"], jpeg)
+        self.assertGreater(sequence, 0)
+        self.assertTrue(self.bridge.public_device(device["id"])["screen_active"])
+        self.assertEqual(self.bridge.get_screen_frame(device["id"])["body"], jpeg)
+        self.assertIsNone(self.bridge.get_screen_frame(device["id"], sequence))
+
+        self.bridge.set_screen_active(device["id"], False)
+        self.assertIsNone(self.bridge.get_screen_frame(device["id"]))
+        with self.assertRaises(PhoneBridgeError):
+            self.bridge.publish_screen_frame(device["id"], jpeg)
+
+    def test_screen_frames_are_bounded_and_expire(self):
+        from phone_bridge import MAX_SCREEN_FRAME_BYTES
+
+        _, device = self.pair_and_share()
+        self.bridge.set_screen_active(device["id"], True)
+        with self.assertRaises(PhoneBridgeError) as caught:
+            self.bridge.publish_screen_frame(device["id"], b"\xff\xd8\xff" + b"x" * MAX_SCREEN_FRAME_BYTES)
+        self.assertEqual(caught.exception.status, 413)
+        with self.assertRaises(PhoneBridgeError):
+            self.bridge.publish_screen_frame(device["id"], b"not a jpeg")
+
+        self.bridge.publish_screen_frame(device["id"], b"\xff\xd8\xffframe")
+        self.bridge._screen_frames[device["id"]]["created"] = time.time() - 20
+        self.assertIsNone(self.bridge.get_screen_frame(device["id"]))
 
 
 if __name__ == "__main__":

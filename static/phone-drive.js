@@ -4,6 +4,7 @@
   const devicesEl = $("devices"), itemsEl = $("items"), crumbsEl = $("crumbs");
   const statusEl = $("browser-status"), pairResult = $("pair-result");
   let selected = null, path = [];
+  let screenDeviceId = null, screenSequence = 0, screenObjectUrl = null, screenLastFrameAt = 0;
 
   async function api(url, options = {}) {
     const response = await fetch(url, { credentials: "include", cache: "no-store", ...options });
@@ -44,8 +45,11 @@
       const main = document.createElement("div"); main.className = "device-main";
       const name = document.createElement("div"); name.className = "name"; name.textContent = device.name || "Pixel phone";
       const badge = document.createElement("div"); badge.className = "badge";
-      badge.textContent = device.sharing && device.online ? "Sharing folders · online" : device.online ? "Online · sharing stopped" : "Offline";
+      badge.textContent = device.screen_active ? "Screen sharing · online" : device.sharing && device.online ? "Sharing folders · online" : device.online ? "Online" : "Offline";
       main.append(name, badge);
+      const viewScreen = document.createElement("button"); viewScreen.textContent = "View screen";
+      viewScreen.addEventListener("click", () => startScreen(device));
+      main.append(viewScreen);
       const roots = document.createElement("div"); roots.className = "roots";
       (device.roots || []).forEach((root) => {
         const btn = document.createElement("button"); btn.className = "root"; btn.textContent = root.name;
@@ -63,6 +67,61 @@
       card.append(main,revoke); fragment.append(card);
     });
     devicesEl.replaceChildren(fragment);
+  }
+
+  function startScreen(device) {
+    screenDeviceId = device.id;
+    screenSequence = 0;
+    screenLastFrameAt = 0;
+    $("screen-status").textContent = `Waiting for ${device.name || "phone"}. Start mirroring in the phone app and approve Android’s prompt.`;
+    $("screen-placeholder").textContent = "Waiting for the phone to send its first frame…";
+    $("screen-placeholder").style.display = "block";
+    $("screen-frame").style.display = "none";
+    $("stop-screen").disabled = false;
+    pollScreen();
+  }
+
+  function stopScreen() {
+    screenDeviceId = null;
+    $("stop-screen").disabled = true;
+    $("screen-status").textContent = "Screen viewing stopped. Mirroring on the phone may still be active; stop it in the phone app.";
+    $("screen-frame").style.display = "none";
+    $("screen-placeholder").style.display = "block";
+    $("screen-placeholder").textContent = "No screen selected.";
+    if (screenObjectUrl) URL.revokeObjectURL(screenObjectUrl);
+    screenObjectUrl = null;
+  }
+
+  async function pollScreen() {
+    const deviceId = screenDeviceId;
+    if (!deviceId) return;
+    try {
+      const query = new URLSearchParams({device_id:deviceId, after:String(screenSequence)});
+      const response = await fetch(`/api/phone/screen/frame?${query}`, {credentials:"include", cache:"no-store"});
+      if (screenDeviceId !== deviceId) return;
+      if (response.status === 200) {
+        const nextUrl = URL.createObjectURL(await response.blob());
+        const previousUrl = screenObjectUrl;
+        screenObjectUrl = nextUrl;
+        screenSequence = Number(response.headers.get("X-Frame-Sequence") || screenSequence);
+        screenLastFrameAt = Date.now();
+        const frame = $("screen-frame");
+        frame.onload = () => { if (previousUrl) URL.revokeObjectURL(previousUrl); };
+        frame.src = nextUrl;
+        frame.style.display = "block";
+        $("screen-placeholder").style.display = "none";
+        $("screen-status").textContent = `Live phone screen · frame ${screenSequence}`;
+      } else if (response.status === 401) {
+        $("screen-status").textContent = "Sign in to Nullink in this browser, then refresh.";
+      } else if (response.status !== 204) {
+        $("screen-status").textContent = `Screen request failed (${response.status}).`;
+      } else if (screenLastFrameAt && Date.now() - screenLastFrameAt > 3000) {
+        $("screen-status").textContent = "No new frames. Check that mirroring is active and the phone display is awake.";
+      }
+    } catch (error) {
+      $("screen-status").textContent = error.message || "Screen connection interrupted.";
+    }
+    if (screenDeviceId === deviceId) setTimeout(pollScreen, 500);
   }
 
   function renderBrowser(items = null) {
@@ -113,6 +172,7 @@
 
   function formatBytes(value){if(value<1024)return `${value} B`;if(value<1048576)return `${(value/1024).toFixed(1)} KB`;return `${(value/1048576).toFixed(1)} MB`;}
   $("refresh").addEventListener("click",refresh);
+  $("stop-screen").addEventListener("click",stopScreen);
   $("pair-code").addEventListener("click",async()=>{
     pairResult.textContent="Generating…";
     try{const data=await api("/api/phone/pairing-code",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});

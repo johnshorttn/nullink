@@ -2,12 +2,16 @@ package cloud.nullverse.nullinkphone
 
 import android.Manifest
 import android.app.Activity
+import android.media.projection.MediaProjectionManager
+import android.media.projection.MediaProjectionConfig
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
+import android.text.InputFilter
+import android.text.InputType
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -29,6 +33,7 @@ class MainActivity : Activity() {
     private lateinit var rootsBox: LinearLayout
     private lateinit var statusText: TextView
     private lateinit var shareSwitch: Switch
+    private lateinit var screenStatusText: TextView
     private val pickTree = 7001
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -54,7 +59,10 @@ class MainActivity : Activity() {
         content.addView(baseField)
         deviceNameField = field("Device name", prefs.getString("device_name", "Pixel phone") ?: "Pixel phone")
         content.addView(deviceNameField)
-        pairCodeField = field("One-time pairing code", "")
+        pairCodeField = field("Six-digit one-time pairing code", "").apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            filters = arrayOf(InputFilter.LengthFilter(6))
+        }
         content.addView(pairCodeField)
         content.addView(button("Pair with Nullink") { pairDevice() })
         content.addView(button("Add shared folder") { chooseFolder() })
@@ -65,6 +73,17 @@ class MainActivity : Activity() {
             setOnCheckedChangeListener { _, checked -> if (checked) startSharing() else stopSharing() }
         }
         content.addView(shareSwitch)
+        content.addView(TextView(this).apply {
+            text = "Screen mirroring sends a low-resolution live view to your signed-in Nullink session. Android asks for permission each time. Keep the display awake; locking the phone can pause or blank the picture."
+            textSize = 13f; setPadding(0, 18, 0, 4)
+        })
+        content.addView(button("Start screen mirroring") { requestScreenCapture() })
+        content.addView(button("Stop screen mirroring") { stopScreenCapture() })
+        screenStatusText = TextView(this).apply {
+            text = if (prefs.getBoolean("screen_mirroring", false)) "Screen mirroring may be active." else "Screen mirroring is off."
+            textSize = 13f; setPadding(0, 6, 0, 12)
+        }
+        content.addView(screenStatusText)
         content.addView(TextView(this).apply {
             text = "When sharing is on, Android shows a persistent notification with a Stop control. Locking the screen does not stop the foreground service."
             textSize = 13f; setPadding(0, 10, 0, 12)
@@ -113,7 +132,14 @@ class MainActivity : Activity() {
                     pairCodeField.setText(""); shareSwitch.isEnabled = true
                     statusText.text = "Paired securely. Add folders, then turn sharing on."
                 }
-            } catch (e: Exception) { runOnUiThread { statusText.text = e.message ?: "Pairing failed." } }
+            } catch (e: Exception) {
+                val message = when (e.message) {
+                    "pair_rate_limited" -> "Too many pairing attempts from this network. Wait five minutes and generate a fresh code."
+                    "invalid_or_expired_pairing_code", "invalid_pairing_code" -> "That pairing code is invalid or expired. Generate a new code in Nullink."
+                    else -> e.message ?: "Pairing failed."
+                }
+                runOnUiThread { statusText.text = message }
+            }
         }
     }
 
@@ -127,6 +153,16 @@ class MainActivity : Activity() {
     @Deprecated("The system directory picker result is handled through the activity result callback.")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == pickScreen && resultCode == RESULT_OK && data != null) {
+            val intent = Intent(this, PhoneScreenService::class.java)
+                .setAction(PhoneScreenService.ACTION_START)
+                .putExtra(PhoneScreenService.EXTRA_RESULT_CODE, resultCode)
+                .putExtra(PhoneScreenService.EXTRA_RESULT_DATA, data)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+            prefs.edit().putBoolean("screen_mirroring", true).apply()
+            if (::screenStatusText.isInitialized) screenStatusText.text = "Screen mirroring is active. Keep the phone unlocked while viewing."
+            return
+        }
         if (requestCode != pickTree || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         try {
@@ -205,6 +241,31 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
     }
 
+    private fun requestScreenCapture() {
+        if (TokenVault.read(this) == null) {
+            screenStatusText.text = "Pair this phone with Nullink first."
+            return
+        }
+        val base = try { normalizedBase() } catch (e: Exception) {
+            screenStatusText.text = e.message ?: "Enter the HTTPS Nullink address."
+            return
+        }
+        prefs.edit().putString("base_url", base).apply()
+        val manager = getSystemService(MediaProjectionManager::class.java)
+        val captureIntent = if (Build.VERSION.SDK_INT >= 34) {
+            manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+        } else {
+            manager.createScreenCaptureIntent()
+        }
+        startActivityForResult(captureIntent, pickScreen)
+    }
+
+    private fun stopScreenCapture() {
+        startService(Intent(this, PhoneScreenService::class.java).setAction(PhoneScreenService.ACTION_STOP))
+        prefs.edit().putBoolean("screen_mirroring", false).apply()
+        if (::screenStatusText.isInitialized) screenStatusText.text = "Screen mirroring stopped."
+    }
+
     private fun unpair() {
         if (shareSwitch.isChecked) shareSwitch.isChecked = false
         val token = TokenVault.read(this)
@@ -225,4 +286,6 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() { super.onDestroy(); io.shutdown() }
+
+    companion object { private const val pickScreen = 7002 }
 }

@@ -15,6 +15,10 @@ connection to Nullink; no inbound port or VPN is required.
   after 15 minutes or after one download.
 - Download the selected file into the VPS Chrome session's Downloads folder,
   where a page such as Google Messages for Web can attach it.
+- Start a separate view-only screen session from the phone app. Android shows
+  its system capture approval each time, and a persistent notification provides
+  a Stop control. Frames are downscaled, held in server memory only, and expire
+  within seconds; they are not recorded.
 
 Folder access is read-only. This is an on-demand file handoff, not a sync
 service or a native Windows mapped drive. The current transfer limit is 25 MB.
@@ -43,5 +47,12 @@ read access through Android's Storage Access Framework. Removing that folder
 releases the grant.
 
 The device token is encrypted with an Android Keystore key. The server stores
-only a hash of that token. Pairing codes expire after two minutes and can be
-used once.
+only a hash of that token. Six-digit pairing codes expire after two minutes
+and can be used once. Pair attempts are limited to eight per client address in
+a five-minute window.
+
+Screen mirroring is independent of folder sharing. Tap **Start screen
+mirroring** in the phone app and accept Android's screen-capture prompt, then
+choose **View screen** for that phone in Nullink. Keep the display awake for
+best results; Android may blank or pause capture when the display locks. Stop
+mirroring in the phone app or from its persistent notification.

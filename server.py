@@ -6,6 +6,7 @@ import difflib
 import base64
 import hashlib
 import hmac
+import ipaddress
 import io
 import json
 import os
@@ -2200,6 +2201,24 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return device
 
+    def _phone_pair_client_key(self) -> str:
+        peer = str(self.client_address[0] if self.client_address else "unknown")
+        try:
+            is_local_proxy = ipaddress.ip_address(peer).is_loopback
+        except ValueError:
+            is_local_proxy = False
+        if is_local_proxy:
+            forwarded = self.headers.get("X-Forwarded-For", "")
+            candidates = [part.strip() for part in forwarded.split(",") if part.strip()]
+            if candidates:
+                candidate = candidates[-1]
+                try:
+                    ipaddress.ip_address(candidate)
+                    return candidate
+                except ValueError:
+                    pass
+        return peer
+
     def _phone_error(self, error: PhoneBridgeError) -> None:
         self._json(error.status, {"error": error.code})
 
@@ -2483,6 +2502,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._json(200, {"devices": get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).list_devices()})
 
+        if path == "/api/phone/screen/frame":
+            if not self._require_auth():
+                return
+            device_id = (qs.get("device_id") or [""])[0]
+            try:
+                after = int((qs.get("after") or [0])[0])
+                frame = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).get_screen_frame(device_id, after)
+            except (ValueError, PhoneBridgeError) as e:
+                return self._phone_error(e if isinstance(e, PhoneBridgeError) else PhoneBridgeError("invalid_frame_sequence"))
+            if not frame:
+                return self._send(204, b"", "image/jpeg", [("X-Frame-Sequence", str(max(0, after)))])
+            return self._send(200, frame["body"], "image/jpeg", [
+                ("X-Frame-Sequence", str(frame["sequence"])),
+                ("X-Frame-Timestamp", str(int(frame["created"] * 1000))),
+            ])
+
         if path == "/api/phone/commands/next":
             device = self._phone_device_auth()
             if not device:
@@ -2606,7 +2641,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/phone/pair":
             body = self._read_json()
             try:
-                result = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).pair(body.get("code"), body.get("name"))
+                result = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).pair(
+                    body.get("code"), body.get("name"), self._phone_pair_client_key())
                 return self._json(201, result)
             except PhoneBridgeError as e:
                 return self._phone_error(e)
@@ -2619,6 +2655,17 @@ class Handler(BaseHTTPRequestHandler):
                 result = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).set_sharing(
                     device["id"], bool(body.get("enabled")), body.get("roots") or [])
                 return self._json(200, {"device": result})
+            except PhoneBridgeError as e:
+                return self._phone_error(e)
+        if path == "/api/phone/screen/status":
+            device = self._phone_device_auth()
+            if not device:
+                return
+            body = self._read_json()
+            try:
+                get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).set_screen_active(
+                    device["id"], bool(body.get("active")))
+                return self._json(200, {"ok": True, "active": bool(body.get("active"))})
             except PhoneBridgeError as e:
                 return self._phone_error(e)
         if path == "/api/messages":
@@ -2711,6 +2758,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         # alias save
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/phone/screen/frame":
+            device = self._phone_device_auth()
+            if not device:
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self._json(400, {"error": "invalid_content_length"})
+            from phone_bridge import MAX_SCREEN_FRAME_BYTES
+            if length <= 0 or length > MAX_SCREEN_FRAME_BYTES:
+                return self._json(413, {"error": "screen_frame_too_large_or_empty", "max_bytes": MAX_SCREEN_FRAME_BYTES})
+            try:
+                body = self.rfile.read(length)
+                sequence = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).publish_screen_frame(device["id"], body)
+                return self._json(200, {"ok": True, "sequence": sequence})
+            except PhoneBridgeError as e:
+                return self._phone_error(e)
         m = re.match(r"^/api/phone/commands/([a-f0-9]{32})/file$", path)
         if m:
             device = self._phone_device_auth()
