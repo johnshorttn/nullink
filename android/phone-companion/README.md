@@ -35,6 +35,10 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 GitHub Actions also builds the debug APK on pushes and pull requests that touch
 this directory.
 
+The CI build uses a separate `Nullink Phone Awake` package so it can be
+installed beside an older debug build. Pair the new install and reselect its
+shared folders; Android keeps the old app's data separate.
+
 ## Android behavior
 
 Sharing uses a user-started `specialUse` foreground service because it must

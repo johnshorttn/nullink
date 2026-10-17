@@ -13,11 +13,13 @@ android {
     }
 
     defaultConfig {
-        applicationId = "cloud.nullverse.nullinkphone"
+        // Separate package lets users install this CI-signed build beside an
+        // earlier debug build whose ephemeral signing key is no longer available.
+        applicationId = "cloud.nullverse.nullinkphone.awake"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.2.0"
     }
 }
 
