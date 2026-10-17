@@ -53,6 +53,8 @@ a five-minute window.
 
 Screen mirroring is independent of folder sharing. Tap **Start screen
 mirroring** in the phone app and accept Android's screen-capture prompt, then
-choose **View screen** for that phone in Nullink. Keep the display awake for
-best results; Android may blank or pause capture when the display locks. Stop
-mirroring in the phone app or from its persistent notification.
+choose **View screen** for that phone in Nullink. While mirroring is active, the
+phone app holds a dim screen wake lock to prevent automatic timeout. This uses
+extra battery; pressing the power button still turns the display off and may
+blank the captured picture. Stop mirroring in the phone app or from its
+persistent notification to release the wake lock.

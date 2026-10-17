@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.PowerManager
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -44,6 +45,7 @@ class PhoneScreenService : Service() {
     private var display: VirtualDisplay? = null
     private var reader: ImageReader? = null
     private var captureThread: HandlerThread? = null
+    private var screenWakeLock: PowerManager.WakeLock? = null
     private var lastFrameAt = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -73,6 +75,7 @@ class PhoneScreenService : Service() {
             startForeground(NOTIFICATION_ID, notice)
         }
         try {
+            keepScreenAwake()
             val manager = getSystemService(MediaProjectionManager::class.java)
             val mediaProjection = manager.getMediaProjection(resultCode, resultData)
             projection = mediaProjection
@@ -151,6 +154,18 @@ class PhoneScreenService : Service() {
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun keepScreenAwake() {
+        val power = getSystemService(PowerManager::class.java)
+        screenWakeLock = power.newWakeLock(
+            PowerManager.SCREEN_DIM_WAKE_LOCK,
+            "$packageName:PhoneScreenMirroring"
+        ).apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
     private fun stopCapture(projectionAlreadyStopped: Boolean = false) {
         if (!stopping.compareAndSet(false, true)) return
         prefs.edit().putBoolean("screen_mirroring", false).apply()
@@ -162,6 +177,8 @@ class PhoneScreenService : Service() {
         captureThread = null
         if (!projectionAlreadyStopped) try { projection?.stop() } catch (_: Exception) { }
         projection = null
+        try { screenWakeLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) { }
+        screenWakeLock = null
         notifyServer(false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
