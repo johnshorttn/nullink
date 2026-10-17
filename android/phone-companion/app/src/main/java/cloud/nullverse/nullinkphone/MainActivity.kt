@@ -74,7 +74,7 @@ class MainActivity : Activity() {
         }
         content.addView(shareSwitch)
         content.addView(TextView(this).apply {
-            text = "Screen mirroring sends a low-resolution live view to your signed-in Nullink session. Android asks for permission each time. Keep the display awake; locking the phone can pause or blank the picture."
+            text = "Screen mirroring sends a low-resolution live view to your signed-in Nullink session. Android asks for permission each time. While mirroring runs, Nullink Phone keeps the display awake (at a dim level) so it does not time out. This uses extra battery. Pressing the power button still turns the display off."
             textSize = 13f; setPadding(0, 18, 0, 4)
         })
         content.addView(button("Start screen mirroring") { requestScreenCapture() })
@@ -85,7 +85,7 @@ class MainActivity : Activity() {
         }
         content.addView(screenStatusText)
         content.addView(TextView(this).apply {
-            text = "When sharing is on, Android shows a persistent notification with a Stop control. Locking the screen does not stop the foreground service."
+            text = "Android shows a persistent notification with a Stop control while mirroring. Stopping mirroring releases the keep-awake lock. If you turn the display off manually, the service continues but the live picture may go blank."
             textSize = 13f; setPadding(0, 10, 0, 12)
         })
         statusText = TextView(this).apply { text = "Not paired"; textSize = 14f }
