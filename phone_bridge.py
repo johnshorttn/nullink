@@ -1,8 +1,8 @@
-"""Authenticated, on-demand bridge for a Nullink Android companion.
+"""Authenticated relay for a Nullink Android companion.
 
-The phone opens an outbound HTTPS long-poll. Nullink can ask it to list a
-selected folder or read one selected file; it never exposes a listener on the
-phone and never mirrors file contents in the background.
+The phone opens outbound HTTPS connections only. Folder listings and file
+contents are returned on request; approved screen sessions publish short-lived
+frames in memory and never create a recording.
 """
 from __future__ import annotations
 
@@ -20,13 +20,16 @@ import uuid
 from pathlib import Path
 
 PAIR_CODE_TTL = 120
+PAIR_ATTEMPT_WINDOW = 300
+PAIR_ATTEMPT_LIMIT = 8
 STAGED_TTL = 15 * 60
 DEVICE_ACTIVE_TTL = 90
 MAX_ROOTS = 32
 MAX_STAGED_BYTES = 25 * 1024 * 1024
+MAX_SCREEN_FRAME_BYTES = 768 * 1024
+SCREEN_FRAME_TTL = 8
 ROOT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 DOC_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
 class PhoneBridgeError(Exception):
@@ -46,9 +49,12 @@ class PhoneBridge:
         self._lock = threading.RLock()
         self._changed = threading.Condition(self._lock)
         self._pair_codes: dict[str, float] = {}
+        self._pair_attempts: dict[str, list[float]] = {}
         self._queues: dict[str, queue.Queue] = {}
         self._pending: dict[str, dict] = {}
         self._staged: dict[str, dict] = {}
+        self._screen_frames: dict[str, dict] = {}
+        self._screen_sequence = 0
         self._devices = self._load_devices()
         # Process restart ends every temporary file session; never resurrect
         # staged attachment bytes without the owning browser session.
@@ -83,16 +89,25 @@ class PhoneBridge:
             pass
 
     def create_pairing_code(self) -> dict:
-        code = "-".join("".join(secrets.choice(PAIR_ALPHABET) for _ in range(4)) for _ in range(3))
+        code = f"{secrets.randbelow(1_000_000):06d}"
         with self._lock:
             now = time.time()
             self._pair_codes = {k: expiry for k, expiry in self._pair_codes.items() if expiry > now}
-            self._pair_codes[self._hash(code.replace("-", ""))] = now + PAIR_CODE_TTL
+            self._pair_codes[self._hash(code)] = now + PAIR_CODE_TTL
         return {"code": code, "expires_in": PAIR_CODE_TTL}
 
-    def pair(self, code: str, name: str) -> dict:
-        normalized = re.sub(r"[-\s]", "", str(code or "")).upper()
-        if not re.fullmatch(r"[A-HJ-NP-Z2-9]{12}", normalized):
+    def pair(self, code: str, name: str, client_key: str = "unknown") -> dict:
+        normalized = str(code or "").strip().replace("-", "").replace(" ", "")
+        rate_key = self._hash(str(client_key or "unknown"))
+        now_mono = time.monotonic()
+        with self._lock:
+            attempts = [t for t in self._pair_attempts.get(rate_key, []) if now_mono - t < PAIR_ATTEMPT_WINDOW]
+            if len(attempts) >= PAIR_ATTEMPT_LIMIT:
+                self._pair_attempts[rate_key] = attempts
+                raise PhoneBridgeError("pair_rate_limited", 429)
+            attempts.append(now_mono)
+            self._pair_attempts[rate_key] = attempts
+        if not re.fullmatch(r"[0-9]{6}", normalized):
             raise PhoneBridgeError("invalid_pairing_code", 401)
         hashed = self._hash(normalized)
         now = time.time()
@@ -101,6 +116,7 @@ class PhoneBridge:
             self._pair_codes = {k: value for k, value in self._pair_codes.items() if value > now}
             if expiry is None or expiry <= now:
                 raise PhoneBridgeError("invalid_or_expired_pairing_code", 401)
+            self._pair_attempts.pop(rate_key, None)
             device_id = uuid.uuid4().hex
             token = secrets.token_urlsafe(32)
             label = re.sub(r"[\x00-\x1f\x7f]", "", str(name or "Pixel phone")).strip()[:80] or "Pixel phone"
@@ -111,6 +127,7 @@ class PhoneBridge:
                 "paired_at": int(now),
                 "last_seen": int(now),
                 "sharing": False,
+                "screen_active": False,
                 "roots": [],
             }
             self._save_devices()
@@ -132,11 +149,15 @@ class PhoneBridge:
             device = self._devices.get(device_id)
             if not device:
                 return None
-            online = time.time() - float(device.get("last_seen") or 0) <= DEVICE_ACTIVE_TTL
+            now = time.time()
+            online = now - float(device.get("last_seen") or 0) <= DEVICE_ACTIVE_TTL
+            frame = self._screen_frames.get(device_id)
+            screen_live = bool(device.get("screen_active") and online and frame and now - frame["created"] <= SCREEN_FRAME_TTL)
             return {
                 "id": device.get("id"), "name": device.get("name"),
                 "paired_at": device.get("paired_at"), "last_seen": device.get("last_seen"),
                 "online": online, "sharing": bool(device.get("sharing") and online),
+                "screen_active": screen_live,
                 "roots": list(device.get("roots") or []) if online and device.get("sharing") else [],
             }
 
@@ -148,6 +169,7 @@ class PhoneBridge:
         with self._changed:
             existed = self._devices.pop(device_id, None) is not None
             self._queues.pop(device_id, None)
+            self._screen_frames.pop(device_id, None)
             for request_id, item in list(self._pending.items()):
                 if item.get("device_id") == device_id:
                     item["error"] = "device_revoked"
@@ -163,6 +185,48 @@ class PhoneBridge:
             self._save_devices()
             self._changed.notify_all()
             return existed
+
+    def set_screen_active(self, device_id: str, enabled: bool) -> None:
+        with self._lock:
+            device = self._devices.get(device_id)
+            if not device:
+                raise PhoneBridgeError("device_revoked", 401)
+            device["screen_active"] = bool(enabled)
+            device["last_seen"] = int(time.time())
+            if not enabled:
+                self._screen_frames.pop(device_id, None)
+            self._save_devices()
+
+    def publish_screen_frame(self, device_id: str, body: bytes) -> int:
+        if not body or len(body) > MAX_SCREEN_FRAME_BYTES:
+            raise PhoneBridgeError("invalid_screen_frame", 413)
+        if not body.startswith(b"\xff\xd8\xff"):
+            raise PhoneBridgeError("invalid_screen_frame", 400)
+        with self._lock:
+            device = self._devices.get(device_id)
+            if not device:
+                raise PhoneBridgeError("device_revoked", 401)
+            if not device.get("screen_active"):
+                raise PhoneBridgeError("screen_sharing_inactive", 409)
+            self._screen_sequence += 1
+            sequence = self._screen_sequence
+            device["last_seen"] = int(time.time())
+            self._screen_frames[device_id] = {
+                "sequence": sequence, "body": bytes(body), "created": time.time(),
+            }
+            return sequence
+
+    def get_screen_frame(self, device_id: str, after: int = 0) -> dict | None:
+        with self._lock:
+            if device_id not in self._devices:
+                raise PhoneBridgeError("device_not_found", 404)
+            frame = self._screen_frames.get(device_id)
+            if not frame or time.time() - frame["created"] > SCREEN_FRAME_TTL:
+                self._screen_frames.pop(device_id, None)
+                return None
+            if frame["sequence"] <= max(0, int(after)):
+                return None
+            return dict(frame)
 
     def set_sharing(self, device_id: str, enabled: bool, roots: list) -> dict:
         if not isinstance(roots, list) or len(roots) > MAX_ROOTS:

@@ -29,12 +29,21 @@
   <main>
     <section>
       <h2>Connect your Pixel</h2>
-      <p class="muted">Generate a one-time pairing code here, then enter it in the Nullink Phone companion app. The code expires in two minutes.</p>
+      <p class="muted">Generate a six-digit one-time pairing code here, then enter it in the Nullink Phone companion app. The code expires in two minutes.</p>
       <div class="row"><button id="pair-code" class="primary">Generate pairing code</button><span id="pair-result" aria-live="polite"></span></div>
     </section>
     <section>
       <h2>Paired phones</h2>
       <div id="devices" class="devices"><div class="empty">Loading devices…</div></div>
+    </section>
+    <section>
+      <h2>Live phone screen</h2>
+      <p class="muted">View-only stream. Start screen mirroring in Nullink Phone and approve Android’s screen-capture prompt. Keep the phone display awake while viewing.</p>
+      <div class="row"><button id="stop-screen" class="danger" disabled>Stop viewing</button><span id="screen-status" class="status" role="status">Choose View screen on an online phone.</span></div>
+      <div style="margin-top:10px;background:#090b10;border-radius:10px;min-height:180px;display:grid;place-items:center;overflow:auto">
+        <img id="screen-frame" alt="Live phone screen" style="display:none;max-width:100%;max-height:75vh;object-fit:contain" />
+        <span id="screen-placeholder" class="empty">No screen selected.</span>
+      </div>
     </section>
     <section>
       <h2>Browse shared folders</h2>
