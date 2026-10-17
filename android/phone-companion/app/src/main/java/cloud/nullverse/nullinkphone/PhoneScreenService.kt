@@ -32,7 +32,7 @@ class PhoneScreenService : Service() {
         const val EXTRA_RESULT_DATA = "projection_result_data"
         private const val CHANNEL_ID = "nullink_phone_screen"
         private const val NOTIFICATION_ID = 8403
-        private const val MAX_EDGE = 720
+        private const val MAX_EDGE = 1280
         private const val FRAME_INTERVAL_MS = 500L
     }
 
