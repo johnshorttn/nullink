@@ -6,6 +6,7 @@
   let selected = null, path = [];
   let screenDeviceId = null, screenSequence = 0, screenObjectUrl = null, screenLastFrameAt = 0;
 
+  let screenEpoch = 0;
   let controlEnabled = false, controlBusy = false, pointer = null;
   function setControl(enabled, message) {
     controlEnabled = enabled;
@@ -123,6 +124,7 @@
   }
 
   function startScreen(device) {
+    screenEpoch++;
     pointer = null; setControl(false, "Checking phone control status…");
     screenDeviceId = device.id;
     refresh();
@@ -137,6 +139,7 @@
   }
 
   function stopScreen() {
+    screenEpoch++;
     pointer = null; setControl(false, "Control off · no screen selected.");
     screenDeviceId = null;
     $("stop-screen").disabled = true;
@@ -149,14 +152,17 @@
   }
 
   async function pollScreen() {
+    const epoch = screenEpoch;
     const deviceId = screenDeviceId;
     if (!deviceId) return;
     try {
       const query = new URLSearchParams({device_id:deviceId, after:String(screenSequence)});
       const response = await fetch(`/api/phone/screen/frame?${query}`, {credentials:"include", cache:"no-store"});
-      if (screenDeviceId !== deviceId) return;
+      if (screenDeviceId !== deviceId || screenEpoch !== epoch) return;
       if (response.status === 200) {
-        const nextUrl = URL.createObjectURL(await response.blob());
+        const blob = await response.blob();
+        if (screenDeviceId !== deviceId || screenEpoch !== epoch) return;
+        const nextUrl = URL.createObjectURL(blob);
         const previousUrl = screenObjectUrl;
         screenObjectUrl = nextUrl;
         screenSequence = Number(response.headers.get("X-Frame-Sequence") || screenSequence);
@@ -177,7 +183,7 @@
     } catch (error) {
       $("screen-status").textContent = error.message || "Screen connection interrupted.";
     }
-    if (screenDeviceId === deviceId) setTimeout(pollScreen, 500);
+    if (screenDeviceId === deviceId && screenEpoch === epoch) setTimeout(() => { if (screenEpoch === epoch) pollScreen(); }, 500);
   }
 
   function renderBrowser(items = null) {

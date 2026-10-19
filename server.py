@@ -2673,6 +2673,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
                 return self._json(415, {"error": "json_required"})
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self._json(400, {"error": "invalid_content_length"})
+            if not 0 < length <= 2048:
+                return self._json(413, {"error": "control_request_too_large"})
             body = self._read_json()
             try:
                 if not isinstance(body, dict) or set(body) != {"device_id", "command"}:

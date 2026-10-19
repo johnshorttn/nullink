@@ -258,6 +258,11 @@ class MainActivity : Activity() {
     }
 
     private fun requestScreenCapture() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 90)
+            screenStatusText.text = "Allow notifications so the active mirroring/control indicator and Stop action stay visible."
+            return
+        }
         if (TokenVault.read(this) == null) {
             screenStatusText.text = "Pair this phone with Nullink first."
             return
