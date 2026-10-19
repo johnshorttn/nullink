@@ -38,10 +38,14 @@
     </section>
     <section>
       <h2>Live phone screen</h2>
-      <p class="muted">View-only stream. Start screen mirroring in Nullink Phone and approve Android’s screen-capture prompt. Keep the phone display awake while viewing.</p>
+      <p class="muted">Click or tap the live image to tap your phone; drag to swipe. Enable Accessibility and allow remote control for this session in the phone app. Locked screens and protected dialogs are unsupported. Start screen mirroring in Nullink Phone and approve Android’s screen-capture prompt. Keep the phone display awake while viewing.</p>
       <div class="row"><button id="stop-screen" class="danger" disabled>Stop viewing</button><span id="screen-status" class="status" role="status">Choose View screen on an online phone.</span></div>
+      <div class="row" style="margin-top:10px" id="control-buttons">
+        <button data-control="back" disabled>Back</button><button data-control="home" disabled>Home</button><button data-control="recents" disabled>Recents</button>
+        <span id="control-status" role="status">Control off · select a phone.</span>
+      </div>
       <div style="margin-top:10px;background:#090b10;border-radius:10px;min-height:180px;display:grid;place-items:center;overflow:auto">
-        <img id="screen-frame" alt="Live phone screen" style="display:none;max-width:100%;max-height:75vh;object-fit:contain" />
+        <img id="screen-frame" alt="Live phone screen: tap or drag to control the selected phone" draggable="false" style="display:none;max-width:100%;max-height:75vh;object-fit:contain;touch-action:none;user-select:none" />
         <span id="screen-placeholder" class="empty">No screen selected.</span>
       </div>
     </section>

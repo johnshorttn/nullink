@@ -35,6 +35,7 @@ class MainActivity : Activity() {
     private lateinit var shareSwitch: Switch
     private lateinit var screenStatusText: TextView
     private val pickTree = 7001
+    private lateinit var controlStatus: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,6 +85,21 @@ class MainActivity : Activity() {
             textSize = 13f; setPadding(0, 6, 0, 12)
         }
         content.addView(screenStatusText)
+        controlStatus = TextView(this).apply { textSize = 14f }
+        content.addView(controlStatus)
+        content.addView(TextView(this).apply {
+            text = "Remote control is optional. Manually enable Nullink Phone Control in Android Accessibility Settings, start mirroring, then allow control for this session. Your signed-in browser can tap, swipe, and navigate. Locked screens and protected dialogs cannot be controlled. Rotate the phone only after stopping mirroring; restart to use the new orientation."
+        })
+        content.addView(button("Open Accessibility Settings") {
+            startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        })
+        content.addView(button("Allow remote control for this session") {
+            PhoneControlService.allowed = PhoneControlService.instance != null && PhoneControlService.session != null
+            updateControlStatus()
+        })
+        content.addView(button("Stop remote control") {
+            PhoneControlService.stopControl(); updateControlStatus()
+        })
         content.addView(TextView(this).apply {
             text = "Android shows a persistent notification with a Stop control while mirroring. Stopping mirroring releases the keep-awake lock. If you turn the display off manually, the service continues but the live picture may go blank."
             textSize = 13f; setPadding(0, 10, 0, 12)
@@ -267,6 +283,7 @@ class MainActivity : Activity() {
     }
 
     private fun unpair() {
+        stopScreenCapture()
         if (shareSwitch.isChecked) shareSwitch.isChecked = false
         val token = TokenVault.read(this)
         val base = prefs.getString("base_url", "") ?: ""
@@ -284,6 +301,16 @@ class MainActivity : Activity() {
         val map = getSharedPreferences("nullink_phone_documents", MODE_PRIVATE)
         map.all.keys.filter { it.startsWith("$rootId:") }.forEach { map.edit().remove(it).apply() }
     }
+
+    private fun updateControlStatus() {
+        if (::controlStatus.isInitialized) controlStatus.text = when {
+            PhoneControlService.instance == null -> "Control disabled: manually enable Nullink Phone Control in Accessibility Settings."
+            PhoneControlService.session == null -> "Accessibility enabled. Start screen mirroring before allowing control."
+            PhoneControlService.allowed -> "REMOTE CONTROL ACTIVE. Use Stop remote control or Stop mirroring to end it."
+            else -> "Accessibility enabled. Remote control is OFF until you allow this session."
+        }
+    }
+    override fun onResume() { super.onResume(); updateControlStatus() }
 
     override fun onDestroy() { super.onDestroy(); io.shutdown() }
 

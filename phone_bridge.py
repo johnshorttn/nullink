@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import mimetypes
+import math
 import os
 import queue
 import re
@@ -55,6 +56,9 @@ class PhoneBridge:
         self._staged: dict[str, dict] = {}
         self._screen_frames: dict[str, dict] = {}
         self._screen_sequence = 0
+        self._control = {}
+        self._control_queues = {}
+        self._control_rates = {}
         self._devices = self._load_devices()
         # Process restart ends every temporary file session; never resurrect
         # staged attachment bytes without the owning browser session.
@@ -158,6 +162,8 @@ class PhoneBridge:
                 "paired_at": device.get("paired_at"), "last_seen": device.get("last_seen"),
                 "online": online, "sharing": bool(device.get("sharing") and online),
                 "screen_active": screen_live,
+                "control_enabled": bool(screen_live and self._control_ready(device_id)),
+                "accessibility_enabled": bool(self._control.get(device_id, {}).get("accessibility") and now - self._control.get(device_id, {}).get("seen", 0) < 10),
                 "roots": list(device.get("roots") or []) if online and device.get("sharing") else [],
             }
 
@@ -168,6 +174,9 @@ class PhoneBridge:
     def revoke(self, device_id: str) -> bool:
         with self._changed:
             existed = self._devices.pop(device_id, None) is not None
+            self._control.pop(device_id, None)
+            self._control_queues.pop(device_id, None)
+            self._control_rates.pop(device_id, None)
             self._queues.pop(device_id, None)
             self._screen_frames.pop(device_id, None)
             for request_id, item in list(self._pending.items()):
@@ -186,6 +195,102 @@ class PhoneBridge:
             self._changed.notify_all()
             return existed
 
+    def _control_ready(self, device_id):
+        state = self._control.get(device_id, {})
+        return bool(state.get("enabled") and state.get("accessibility") and
+                    time.time() - state.get("seen", 0) < 10 and
+                    self._devices.get(device_id, {}).get("screen_active"))
+
+    def set_control_state(self, device_id, body):
+        if (not isinstance(body, dict) or set(body) != {"enabled", "accessibility", "session"} or
+                type(body["enabled"]) is not bool or type(body["accessibility"]) is not bool or
+                not isinstance(body["session"], str) or not re.fullmatch(r"[a-f0-9]{32}", body["session"])):
+            raise PhoneBridgeError("invalid_control_state")
+        with self._changed:
+            if device_id not in self._devices:
+                raise PhoneBridgeError("device_revoked", 401)
+            previous = self._control.get(device_id, {})
+            if previous.get("session") != body["session"] or not body["enabled"] or not body["accessibility"]:
+                self._cancel_controls(device_id)
+            self._control[device_id] = {**body, "seen": time.time()}
+            self._changed.notify_all()
+
+    def _cancel_controls(self, device_id):
+        self._control_queues.pop(device_id, None)
+        for item in self._pending.values():
+            if item["device_id"] == device_id and item["operation"] == "control":
+                item["error"] = "control_stopped"
+                item["event"].set()
+
+    @staticmethod
+    def validate_control(command):
+        if not isinstance(command, dict):
+            raise PhoneBridgeError("invalid_control_command")
+        action = command.get("action")
+        fields = {"tap": {"action", "x", "y"},
+                  "swipe": {"action", "x", "y", "end_x", "end_y", "duration_ms"},
+                  "back": {"action"}, "home": {"action"}, "recents": {"action"}}
+        if not isinstance(action, str) or action not in fields or set(command) != fields[action]:
+            raise PhoneBridgeError("invalid_control_command")
+        for key in ("x", "y", "end_x", "end_y"):
+            if key in command and (type(command[key]) not in (int, float) or
+                    not math.isfinite(command[key]) or not 0 <= command[key] <= 1):
+                raise PhoneBridgeError("invalid_control_coordinates")
+        if action == "swipe" and (type(command["duration_ms"]) is not int or not 100 <= command["duration_ms"] <= 1000):
+            raise PhoneBridgeError("invalid_control_duration")
+        return dict(command)
+
+    def request_control(self, device_id, command, timeout=4):
+        command = self.validate_control(command)
+        with self._changed:
+            if not isinstance(device_id, str) or device_id not in self._devices:
+                raise PhoneBridgeError("device_not_found", 404)
+            frame = self._screen_frames.get(device_id)
+            if not self._control_ready(device_id) or not frame or time.time() - frame["created"] > SCREEN_FRAME_TTL:
+                raise PhoneBridgeError("control_disabled_enable_on_phone", 409)
+            now = time.time()
+            rate = [t for t in self._control_rates.get(device_id, []) if now - t < 1]
+            if len(rate) >= 5:
+                raise PhoneBridgeError("control_rate_limited", 429)
+            q = self._control_queues.setdefault(device_id, queue.Queue(maxsize=4))
+            if q.full():
+                raise PhoneBridgeError("control_queue_full", 429)
+            self._control_rates[device_id] = rate + [now]
+            request_id = uuid.uuid4().hex
+            item = {"id": request_id, "device_id": device_id, "operation": "control",
+                    "event": threading.Event(), "error": None, "result": None}
+            self._pending[request_id] = item
+            q.put({"id": request_id, "operation": "control", "command": command,
+                   "session": self._control[device_id]["session"], "expires_at": int((now + 3) * 1000)})
+            self._changed.notify_all()
+        try:
+            if not item["event"].wait(min(4, max(.1, timeout))):
+                raise PhoneBridgeError("control_timeout", 504)
+            if item["error"]:
+                raise PhoneBridgeError(item["error"], 409)
+            return {"ok": True}
+        finally:
+            with self._lock:
+                self._pending.pop(request_id, None)
+
+    def next_control(self, device_id, timeout=2):
+        deadline = time.time() + max(0, min(timeout, 2))
+        with self._changed:
+            while True:
+                if not self._control_ready(device_id):
+                    return None
+                q = self._control_queues.get(device_id)
+                if q:
+                    while not q.empty():
+                        command = q.get_nowait()
+                        if (command["id"] in self._pending and command["expires_at"] > time.time() * 1000
+                                and command["session"] == self._control[device_id]["session"]):
+                            return command
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return None
+                self._changed.wait(remaining)
+
     def set_screen_active(self, device_id: str, enabled: bool) -> None:
         with self._lock:
             device = self._devices.get(device_id)
@@ -194,6 +299,8 @@ class PhoneBridge:
             device["screen_active"] = bool(enabled)
             device["last_seen"] = int(time.time())
             if not enabled:
+                self._cancel_controls(device_id)
+                self._control.pop(device_id, None)
                 self._screen_frames.pop(device_id, None)
             self._save_devices()
 
@@ -328,6 +435,12 @@ class PhoneBridge:
             item = self._pending.get(request_id)
             if not item or item.get("device_id") != device_id:
                 raise PhoneBridgeError("unknown_request", 404)
+            if item.get("operation") == "control":
+                if not isinstance(result, dict) or set(result) != {"ok"} or type(result["ok"]) is not bool:
+                    raise PhoneBridgeError("invalid_control_result")
+                item["error"] = None if result["ok"] else "phone_control_rejected"
+                item["event"].set()
+                return
             if isinstance(result, dict) and result.get("error"):
                 item["error"] = "phone_read_failed"
                 item["event"].set()

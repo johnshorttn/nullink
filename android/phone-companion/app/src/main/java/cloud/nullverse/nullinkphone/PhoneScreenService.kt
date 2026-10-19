@@ -24,7 +24,7 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** User-approved, view-only Android display relay. Frames are never written to disk. */
+/** User-approved Android display relay. Frames are never written to disk. */
 class PhoneScreenService : Service() {
     companion object {
         const val ACTION_START = "cloud.nullverse.nullinkphone.START_SCREEN"
@@ -47,6 +47,30 @@ class PhoneScreenService : Service() {
     private var captureThread: HandlerThread? = null
     private var screenWakeLock: PowerManager.WakeLock? = null
     private var lastFrameAt = 0L
+    private val controlWorker = Executors.newSingleThreadExecutor()
+    private val controlSession = java.util.UUID.randomUUID().toString().replace("-", "")
+
+    private fun controlLoop() {
+        val base = prefs.getString("base_url", "") ?: return
+        val token = TokenVault.read(this) ?: return
+        while (!stopping.get()) {
+            try {
+                val enabled = PhoneControlService.allowed && PhoneControlService.instance != null
+                PhoneApi.json(base, "/api/phone/control/status", token, "POST", org.json.JSONObject()
+                    .put("session", controlSession).put("enabled", enabled)
+                    .put("accessibility", PhoneControlService.instance != null))
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID,
+                    notification(if (enabled) "REMOTE CONTROL ACTIVE · Stop mirroring to stop control" else "Screen view active · Remote control off"))
+                if (!enabled) { Thread.sleep(500); continue }
+                val result = PhoneApi.json(base, "/api/phone/commands/next?channel=control&wait=2", token)
+                val command = result.optJSONObject("command") ?: continue
+                val ok = !stopping.get() && PhoneControlService.execute(command)
+                val id = command.optString("id")
+                if (id.matches(Regex("[a-f0-9]{32}"))) PhoneApi.json(base, "/api/phone/commands/$id/result", token,
+                    "POST", org.json.JSONObject().put("ok", ok))
+            } catch (_: Exception) { if (!stopping.get()) Thread.sleep(1000) }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -84,7 +108,10 @@ class PhoneScreenService : Service() {
             }, Handler(mainLooper))
             beginCapture(mediaProjection)
             prefs.edit().putBoolean("screen_mirroring", true).apply()
+            PhoneControlService.session = controlSession
+            PhoneControlService.allowed = false
             notifyServer(true)
+            controlWorker.execute { controlLoop() }
         } catch (_: Exception) {
             stopCapture()
         }
@@ -93,8 +120,13 @@ class PhoneScreenService : Service() {
 
     private fun beginCapture(mediaProjection: MediaProjection) {
         val metrics = resources.displayMetrics
-        val originalWidth = metrics.widthPixels.coerceAtLeast(1)
-        val originalHeight = metrics.heightPixels.coerceAtLeast(1)
+        val size = android.graphics.Point()
+        @Suppress("DEPRECATION")
+        getSystemService(android.view.WindowManager::class.java).defaultDisplay.getRealSize(size)
+        val originalWidth = size.x.coerceAtLeast(1)
+        val originalHeight = size.y.coerceAtLeast(1)
+        PhoneControlService.captureWidth = originalWidth
+        PhoneControlService.captureHeight = originalHeight
         val scale = minOf(1f, MAX_EDGE.toFloat() / maxOf(originalWidth, originalHeight))
         val width = (originalWidth * scale).toInt().coerceAtLeast(1)
         val height = (originalHeight * scale).toInt().coerceAtLeast(1)
@@ -168,6 +200,8 @@ class PhoneScreenService : Service() {
 
     private fun stopCapture(projectionAlreadyStopped: Boolean = false) {
         if (!stopping.compareAndSet(false, true)) return
+        PhoneControlService.allowed = false
+        PhoneControlService.session = null
         prefs.edit().putBoolean("screen_mirroring", false).apply()
         try { display?.release() } catch (_: Exception) { }
         display = null
@@ -207,6 +241,7 @@ class PhoneScreenService : Service() {
     override fun onDestroy() {
         if (!stopping.get()) stopCapture()
         uploader.shutdown()
+        controlWorker.shutdownNow()
         super.onDestroy()
     }
 }

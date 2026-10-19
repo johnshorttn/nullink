@@ -6,6 +6,56 @@
   let selected = null, path = [];
   let screenDeviceId = null, screenSequence = 0, screenObjectUrl = null, screenLastFrameAt = 0;
 
+  let controlEnabled = false, controlBusy = false, pointer = null;
+  function setControl(enabled, message) {
+    controlEnabled = enabled;
+    document.querySelectorAll("[data-control]").forEach(b => { b.disabled = !enabled || controlBusy; });
+    $("screen-frame").style.cursor = enabled ? "crosshair" : "default";
+    $("control-status").textContent = message;
+  }
+  async function sendControl(command, deviceId = screenDeviceId) {
+    if (!controlEnabled || controlBusy || !deviceId || deviceId !== screenDeviceId || Date.now() - screenLastFrameAt > 3000) return;
+    controlBusy = true;
+    try {
+      await api("/api/phone/control", {method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({device_id:deviceId,command})});
+      if (screenDeviceId === deviceId) $("control-status").textContent = "Control active · tap or drag the image.";
+    } catch (error) {
+      if (screenDeviceId === deviceId) setControl(false, `Control failed: ${error.message}. Check the phone app.`);
+    } finally { controlBusy = false; }
+  }
+  // Account for object-fit: contain, including any letterboxing in the image element.
+  function imagePoint(event) {
+    const img = $("screen-frame"), rect = img.getBoundingClientRect();
+    if (!img.naturalWidth || !rect.width || !rect.height) return null;
+    const scale = Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+    const width = img.naturalWidth * scale, height = img.naturalHeight * scale;
+    const x = (event.clientX - rect.left - (rect.width - width) / 2) / width;
+    const y = (event.clientY - rect.top - (rect.height - height) / 2) / height;
+    return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? {x,y} : null;
+  }
+  $("screen-frame").addEventListener("pointerdown", event => {
+    if (!controlEnabled || controlBusy || event.button !== 0 || pointer) return;
+    const point = imagePoint(event);
+    if (!point) return;
+    event.preventDefault();
+    pointer = {...point, id:event.pointerId, deviceId:screenDeviceId, time:Date.now()};
+    event.currentTarget.setPointerCapture(event.pointerId);
+  });
+  $("screen-frame").addEventListener("pointerup", event => {
+    const start = pointer;
+    if (!start || start.id !== event.pointerId) return;
+    pointer = null;
+    const end = imagePoint(event);
+    if (!end || start.deviceId !== screenDeviceId) return;
+    const distance = Math.hypot(end.x-start.x, end.y-start.y);
+    sendControl(distance < .015 ? {action:"tap", x:start.x, y:start.y} :
+      {action:"swipe", x:start.x, y:start.y, end_x:end.x, end_y:end.y,
+        duration_ms:Math.max(100, Math.min(1000, Date.now()-start.time))}, start.deviceId);
+  });
+  $("screen-frame").addEventListener("pointercancel", () => { pointer = null; });
+  document.querySelectorAll("[data-control]").forEach(button => button.addEventListener("click", () => sendControl({action:button.dataset.control})));
+
   async function api(url, options = {}) {
     const response = await fetch(url, { credentials: "include", cache: "no-store", ...options });
     const type = response.headers.get("content-type") || "";
@@ -31,10 +81,13 @@
     try {
       const data = await api("/api/phone/devices");
       renderDevices(data.devices || []);
+      const active = (data.devices || []).find(d => d.id === screenDeviceId);
+      setControl(Boolean(active?.control_enabled), active?.control_enabled ? "Control active · tap or drag the image." :
+        active?.accessibility_enabled ? "Control off · allow this session in the phone app." : "Control off · enable Nullink Phone Control in Android Accessibility Settings, then allow this session.");
       if (selected && !(data.devices || []).some((d) => d.id === selected.deviceId && d.online && d.sharing && (d.roots || []).some((r) => r.id === selected.rootId))) {
         selected = null; path = []; renderBrowser();
       }
-    } catch (error) { showError(devicesEl, error, error.message === "unauthorized"); }
+    } catch (error) { setControl(false, "Control unavailable: connection lost."); showError(devicesEl, error, error.message === "unauthorized"); }
   }
 
   function renderDevices(devices) {
@@ -70,7 +123,9 @@
   }
 
   function startScreen(device) {
+    pointer = null; setControl(false, "Checking phone control status…");
     screenDeviceId = device.id;
+    refresh();
     screenSequence = 0;
     screenLastFrameAt = 0;
     $("screen-status").textContent = `Waiting for ${device.name || "phone"}. Start mirroring in the phone app and approve Android’s prompt.`;
@@ -82,6 +137,7 @@
   }
 
   function stopScreen() {
+    pointer = null; setControl(false, "Control off · no screen selected.");
     screenDeviceId = null;
     $("stop-screen").disabled = true;
     $("screen-status").textContent = "Screen viewing stopped. Mirroring on the phone may still be active; stop it in the phone app.";
@@ -182,4 +238,5 @@
     }catch(error){pairResult.textContent=error.message==="unauthorized"?"Sign in to Nullink first.":error.message;}
   });
   refresh();
+  setInterval(refresh, 3000);
 })();
