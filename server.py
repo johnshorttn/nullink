@@ -2524,7 +2524,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             wait = (qs.get("wait") or [20])[0]
             try:
-                command = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).next_command(device["id"], float(wait))
+                bridge = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR)
+                poll = bridge.next_control if (qs.get("channel") or [""])[0] == "control" else bridge.next_command
+                command = poll(device["id"], float(wait))
                 return self._json(200, {"command": command})
             except (ValueError, PhoneBridgeError) as e:
                 return self._phone_error(e if isinstance(e, PhoneBridgeError) else PhoneBridgeError("invalid_wait"))
@@ -2655,6 +2657,34 @@ class Handler(BaseHTTPRequestHandler):
                 result = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).set_sharing(
                     device["id"], bool(body.get("enabled")), body.get("roots") or [])
                 return self._json(200, {"device": result})
+            except PhoneBridgeError as e:
+                return self._phone_error(e)
+        if path == "/api/phone/control/status":
+            device = self._phone_device_auth()
+            if not device:
+                return
+            try:
+                get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).set_control_state(device["id"], self._read_json())
+                return self._json(200, {"ok": True})
+            except PhoneBridgeError as e:
+                return self._phone_error(e)
+        if path == "/api/phone/control":
+            if not self._require_auth():
+                return
+            if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
+                return self._json(415, {"error": "json_required"})
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self._json(400, {"error": "invalid_content_length"})
+            if not 0 < length <= 2048:
+                return self._json(413, {"error": "control_request_too_large"})
+            body = self._read_json()
+            try:
+                if not isinstance(body, dict) or set(body) != {"device_id", "command"}:
+                    raise PhoneBridgeError("invalid_control_request")
+                result = get_bridge(PHONE_DATA_DIR, PHONE_STAGING_DIR).request_control(body["device_id"], body["command"])
+                return self._json(200, result)
             except PhoneBridgeError as e:
                 return self._phone_error(e)
         if path == "/api/phone/screen/status":

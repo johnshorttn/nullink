@@ -1,0 +1,3 @@
+<resources>
+    <string name="phone_control_description">Allows your signed-in Nullink browser to tap, swipe, and use Back, Home, and Recents only after you allow control for a screen-mirroring session. Stop mirroring to stop control. No text or window content is read. Locked screens and protected Android dialogs are not supported.</string>
+</resources>

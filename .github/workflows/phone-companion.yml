@@ -26,6 +26,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
+      - name: Test phone bridge and viewer controls
+        run: |
+          python3 -m unittest tests.test_phone_bridge tests.test_phone_control
+          node tests/phone_control_ui.cjs
       - name: Assemble debug APK
         working-directory: android/phone-companion
         run: gradle :app:assembleDebug
