@@ -124,7 +124,7 @@ class ControlHTTPTests(unittest.TestCase):
             thread = threading.Thread(target=httpd.serve_forever, daemon=True); thread.start()
             def request(path, body, headers=None):
                 conn = http.client.HTTPConnection('127.0.0.1', httpd.server_port)
-                conn.request('POST', path, json.dumps(body), {'Content-Type':'application/json', **(headers or {})})
+                conn.request('POST', path, json.dumps(body), {'Content-Type':'application/json', 'Host':'localhost', **(headers or {})})
                 response = conn.getresponse(); payload = response.read(); conn.close()
                 return response.status, payload
             try:

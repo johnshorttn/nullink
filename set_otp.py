@@ -1,61 +1,42 @@
 #!/usr/bin/env python3
-"""Set a 6-digit OTP for the Nullink chat bridge.
+"""Set a fresh single-use 6-digit Nullink PIN.
 
 Usage:
-  python3 set_otp.py            # random PIN
-  python3 set_otp.py 123456     # explicit PIN
+  python3 set_otp.py                 # random PIN (secrets module), valid 24h
+  python3 set_otp.py --ttl-hours 1   # shorter validity
+  python3 set_otp.py 123456          # explicit PIN (discouraged)
+
+The PIN is printed ONCE to stdout for Morc to relay to John. It is stored only as a
+salted PBKDF2 hash in secrets/otp.json (mode 600), works for exactly one successful
+login (or step-up), and is never written anywhere in clear text. Setting a PIN also
+clears all login lockouts.
 """
 from __future__ import annotations
 
-import hashlib
-import json
-import random
-import secrets
+import argparse
 import sys
 import time
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
-SECRETS = BASE / "secrets"
-OTP_FILE = SECRETS / "otp.json"
-CURRENT = SECRETS / "CURRENT_PIN.txt"
-RATE_FILE = BASE / "data" / "rate_limit.json"
-
-
-def hash_pin(pin: str, salt: str) -> str:
-    return hashlib.sha256((salt + pin).encode()).hexdigest()
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import server  # noqa: E402  (shares the exact hashing/storage code)
 
 
 def main() -> None:
-    SECRETS.mkdir(parents=True, exist_ok=True)
-    (BASE / "data").mkdir(parents=True, exist_ok=True)
+    ap = argparse.ArgumentParser(description="Set a single-use Nullink PIN")
+    ap.add_argument("pin", nargs="?", help="explicit 6-digit PIN (default: random)")
+    ap.add_argument("--ttl-hours", type=float, default=server.PIN_TTL_SEC / 3600,
+                    help="validity in hours (default 24)")
+    args = ap.parse_args()
 
-    if len(sys.argv) > 1:
-        pin = sys.argv[1].strip()
-    else:
-        pin = f"{random.randint(0, 999999):06d}"
-
+    pin = (args.pin or server.generate_pin()).strip()
     if not (pin.isdigit() and len(pin) == 6):
         print("PIN must be exactly 6 digits", file=sys.stderr)
         sys.exit(1)
-
-    ttl = 24 * 3600
-    salt = secrets.token_hex(16)
-    now = time.time()
-    data = {
-        "pin_hash": hash_pin(pin, salt),
-        "salt": salt,
-        "expires_at": now + ttl,
-        "created_at": now,
-    }
-    OTP_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    OTP_FILE.chmod(0o600)
-    CURRENT.write_text(pin + "\n", encoding="utf-8")
-    CURRENT.chmod(0o600)
-    RATE_FILE.write_text(json.dumps({"fails": 0, "locked_until": 0}), encoding="utf-8")
-    print(f"OTP set. Clear PIN written to {CURRENT}")
+    info = server.write_otp(pin, int(args.ttl_hours * 3600))
+    expires = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(info["expires_at"]))
     print(f"PIN: {pin}")
-    print(f"Expires in {ttl // 3600}h")
+    print(f"Single-use; expires {expires} ({info['ttl_sec'] // 60} min). Not stored in clear text - relay it now.")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import ipaddress
 import io
+import ipaddress
 import json
 import os
 import re
@@ -22,6 +23,11 @@ import uuid
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import sys as _sys
+import share_links
+import ai_rooms
+
+from phone_bridge import PhoneBridgeError, get_bridge
 
 from phone_bridge import PhoneBridgeError, get_bridge
 
@@ -37,6 +43,12 @@ TOTP_FILE = SECRETS / "totp.json"
 SESSION_SECRET_FILE = SECRETS / "session_secret.txt"
 MESSAGES_FILE = DATA / "messages.jsonl"
 LAST_HANDLED = DATA / ".last-handled"
+# Rooms answered by an on-VPS bridge (not Morc): no pending.notify, webhook or /api/ping wake.
+# deepseek -> /opt/nullink/bridges/deepseek (nullink-deepseek-bridge.service)
+# replit -> /opt/nullink-replit/room.py (nullink-replit.service)
+# council -> A2A groundwork (/opt/nullink-a2a): agents post there; nobody is woken, nobody auto-replies.
+BRIDGE_SESSIONS = frozenset({"deepseek", "replit", "council"})
+OWNER_ONLY_SESSIONS = frozenset({"replit"})
 LABELS_FILE = DATA / "labels.json"
 FILES_FILE = DATA / "files.json"
 APPS_FILE = DATA / "apps.json"
@@ -44,6 +56,7 @@ ROSTER_FILE = DATA / "roster.json"
 PENDING_NOTIFY = DATA / "pending.notify"
 PENDING_UPLOAD = DATA / "pending.upload"
 RATE_FILE = DATA / "rate_limit.json"
+SESSIONS_FILE = DATA / "auth_sessions.json"
 TOKENS_FILE = DATA / "tokens.json"
 WEBHOOK_CONFIG = SECRETS / "webhook.json"
 WEBHOOK_LOG = Path("/tmp/nullink-webhook.log")
@@ -66,7 +79,11 @@ LOCK_SEC = 15 * 60
 TOTP_STEP_SEC = 30
 TOTP_DIGITS = 6
 TOTP_WINDOW = 1
-COOKIE_NAME = "morc_session"
+# __Host- cookie on HTTPS hosts (Path=/, Secure, no Domain); plain name only for
+# direct http://127.0.0.1 use. Legacy morc_session cookies are no longer accepted.
+COOKIE_NAME = "__Host-nullink_session"
+LOCAL_COOKIE_NAME = "nullink_session"
+LEGACY_COOKIE_NAME = "morc_session"
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_PLAYGROUND_BYTES = 25 * 1024 * 1024
 PLAYGROUND_DIR = BASE / "playground" / "chatgpt"
@@ -702,62 +719,134 @@ def _normalize_vault_tags(tags) -> list[str]:
     return out
 
 
-def load_vault_snippet(vid: str) -> dict | None:
-    ensure_dirs()
+# ---- Vault encryption at rest (2026-10-19): AES-256-GCM per entry body ----
+# Titles, tags, ids and timestamps stay plaintext (for list/search); bodies are encrypted.
+# Data key: root-only /etc/nullink/vault/data.key, delivered via systemd LoadCredential
+# (vault_data_key). NULLINK_VAULT_KEY_FILE is honoured for tests / root maintenance only.
+VAULT_KEY_CRED = "vault_data_key"
+VAULT_AAD_PREFIX = b"nullink-vault-v1:"
+VAULT_MASK = "\u2022" * 12
+VAULT_AUDIT_FILE = DATA / "vault_audit.jsonl"
+
+
+class VaultKeyUnavailable(Exception):
+    pass
+
+
+class VaultIntegrityError(Exception):
+    pass
+
+
+def _vault_key() -> bytes:
+    paths = []
+    d = os.environ.get("CREDENTIALS_DIRECTORY")
+    if d:
+        paths.append(Path(d) / VAULT_KEY_CRED)
+    if os.environ.get("NULLINK_VAULT_KEY_FILE"):
+        paths.append(Path(os.environ["NULLINK_VAULT_KEY_FILE"]))
+    for kp in paths:
+        try:
+            raw = base64.b64decode(kp.read_text(encoding="ascii").strip(), validate=True)
+        except (OSError, ValueError):
+            continue
+        if len(raw) == 32:
+            return raw
+    raise VaultKeyUnavailable("vault key not available")
+
+
+def vault_key_available() -> bool:
+    try:
+        _vault_key()
+        return True
+    except VaultKeyUnavailable:
+        return False
+
+
+def vault_encrypt(vid: str, body: str) -> dict:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    nonce = secrets.token_bytes(12)
+    ct = AESGCM(_vault_key()).encrypt(nonce, body.encode("utf-8"), VAULT_AAD_PREFIX + vid.encode())
+    return {"v": 1, "alg": "AES-256-GCM", "n": base64.b64encode(nonce).decode(),
+            "c": base64.b64encode(ct).decode()}
+
+
+def vault_decrypt(vid: str, enc: dict) -> str:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    try:
+        nonce = base64.b64decode(enc["n"], validate=True)
+        ct = base64.b64decode(enc["c"], validate=True)
+        if enc.get("v") != 1 or len(nonce) != 12:
+            raise ValueError("bad envelope")
+        return AESGCM(_vault_key()).decrypt(nonce, ct, VAULT_AAD_PREFIX + vid.encode()).decode("utf-8")
+    except (InvalidTag, KeyError, TypeError, ValueError, UnicodeDecodeError) as e:
+        raise VaultIntegrityError(f"vault entry {vid} failed authentication") from e
+
+
+def vault_audit(event: str, **fields) -> None:
+    rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": event}
+    for k, v in fields.items():
+        rec[k] = v if isinstance(v, (int, float, bool)) or v is None else \
+            "".join(ch for ch in str(v) if ch.isprintable())[:200]
+    try:
+        fd = os.open(VAULT_AUDIT_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
+def _vault_read_raw(vid: str) -> dict | None:
     fp = _vault_path(vid)
     if not fp or not fp.exists():
         return None
     try:
         data = json.loads(fp.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return None
-        return {
-            "id": str(data.get("id") or vid),
-            "title": str(data.get("title") or ""),
-            "body": str(data.get("body") or ""),
-            "tags": _normalize_vault_tags(data.get("tags")),
-            "created_at": data.get("created_at"),
-            "updated_at": data.get("updated_at"),
-        }
     except (OSError, json.JSONDecodeError):
         return None
+    return data if isinstance(data, dict) else None
+
+
+def load_vault_snippet(vid: str, decrypt: bool = True) -> dict | None:
+    """decrypt=False returns metadata with a masked body (no key needed).
+    decrypt=True raises VaultKeyUnavailable / VaultIntegrityError instead of returning bad data."""
+    ensure_dirs()
+    data = _vault_read_raw(vid)
+    if data is None:
+        return None
+    vid = str(data.get("id") or vid)
+    out = {
+        "id": vid,
+        "title": str(data.get("title") or ""),
+        "tags": _normalize_vault_tags(data.get("tags")),
+        "created_at": data.get("created_at"),
+        "updated_at": data.get("updated_at"),
+        "encrypted": isinstance(data.get("enc"), dict),
+    }
+    if not decrypt:
+        out.update(body=VAULT_MASK, locked=True)
+        return out
+    if isinstance(data.get("enc"), dict):
+        out["body"] = vault_decrypt(vid, data["enc"])
+    else:  # legacy plaintext (pre-migration only)
+        out["body"] = str(data.get("body") or "")
+    out["locked"] = False
+    return out
 
 
 def list_vault_snippets(query: str | None = None) -> list[dict]:
+    """Masked list. Search matches title and tags only (bodies are encrypted)."""
     ensure_dirs()
     q = (query or "").strip().lower()
     items: list[dict] = []
     try:
         for fp in sorted(VAULT_DIR.glob("*.json")):
-            try:
-                data = json.loads(fp.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            item = load_vault_snippet(fp.stem, decrypt=False)
+            if not item:
                 continue
-            if not isinstance(data, dict):
+            if q and q not in " ".join([item["title"], " ".join(item["tags"])]).lower():
                 continue
-            item = {
-                "id": str(data.get("id") or fp.stem),
-                "title": str(data.get("title") or ""),
-                "body": str(data.get("body") or ""),
-                "tags": _normalize_vault_tags(data.get("tags")),
-                "created_at": data.get("created_at"),
-                "updated_at": data.get("updated_at"),
-            }
-            if q:
-                blob = " ".join([
-                    item["title"],
-                    item["body"],
-                    " ".join(item["tags"]),
-                ]).lower()
-                if q not in blob:
-                    continue
-            # list view: truncate body for payload size
-            preview = item["body"]
-            items.append({
-                **item,
-                "body": preview[:400],
-                "body_len": len(preview),
-            })
+            items.append(item)
     except OSError:
         pass
     items.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
@@ -765,29 +854,33 @@ def list_vault_snippets(query: str | None = None) -> list[dict]:
 
 
 def save_vault_snippet(entry: dict) -> dict:
+    """Encrypts the body with a fresh nonce on every write. Returns metadata + plaintext body."""
     ensure_dirs()
     vid = _vault_safe_id(str(entry.get("id") or "")) or uuid.uuid4().hex[:12]
     now = iso_now()
+    body = str(entry.get("body") or "")[:100_000]
     out = {
         "id": vid,
         "title": str(entry.get("title") or "").strip()[:200] or "Untitled",
-        "body": str(entry.get("body") or "")[:100_000],
         "tags": _normalize_vault_tags(entry.get("tags")),
         "created_at": entry.get("created_at") or now,
         "updated_at": now,
+        "enc": vault_encrypt(vid, body),
     }
     fp = VAULT_DIR / f"{vid}.json"
+    tmp = VAULT_DIR / f".{vid}.json.tmp"
     with _lock:
-        fp.write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        try:
-            fp.chmod(0o600)
-        except OSError:
-            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+        os.replace(tmp, fp)
         try:
             VAULT_DIR.chmod(0o700)
         except OSError:
             pass
-    return out
+    res = {k: v for k, v in out.items() if k != "enc"}
+    res.update(body=body, encrypted=True, locked=False)
+    return res
 
 
 def delete_vault_snippet(vid: str) -> bool:
@@ -973,41 +1066,1311 @@ def totp_uri(secret: str, account: str = "owner") -> str:
     return f"otpauth://totp/{label}?{params}"
 
 
-def load_rate() -> dict:
-    if not RATE_FILE.exists():
-        return {"fails": 0, "locked_until": 0}
+# ---------- Auth state: PIN, lockout, server-side sessions (2026-10-06 hardening) ----------
+# One re-entrant lock for all auth state files (otp/totp/rate/sessions). Separate from
+# the general _lock so auth code never deadlocks against data helpers.
+_auth_lock = threading.RLock()
+
+LOOPBACK_ADDRS = ("127.0.0.1", "::1", "localhost")
+# Any of these on a loopback request means it came through a proxy (Caddy), not a local tool.
+PROXY_HEADERS = ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded", "X-Real-IP")
+PUBLIC_HTTPS_HOSTS = {"nullverse.cloud", "nullverse.216.158.238.236.sslip.io",
+                      "nullink.nullverse.cloud", "nullink.216.158.238.236.sslip.io"}
+# Nullverse projects portal hosts (sign-in page, /projects, short project paths).
+PORTAL_HOSTS = {"nullverse.cloud", "nullverse.216.158.238.236.sslip.io"}
+SSLIP_PORTAL_HOSTS = {"nullverse.216.158.238.236.sslip.io"}
+
+PIN_TTL_SEC = 24 * 3600
+PIN_KDF = "pbkdf2-sha256"
+PIN_KDF_ITERATIONS = 200_000
+
+# Per-client lockout (client = Caddy-appended rightmost X-Forwarded-For hop).
+IP_MAX_FAILS = 5
+IP_LOCK_BASE_SEC = 15 * 60          # 15 min, then 30, 60, ... (doubles each lockout)
+IP_LOCK_MAX_SEC = 24 * 3600
+IP_STATE_TTL_SEC = 24 * 3600        # forget a client 24h after its last failure/lock
+RATE_MAX_IPS = 5000
+# Global safety ceiling across all clients (needs >=10 distinct IPs to reach).
+GLOBAL_FAIL_WINDOW_SEC = 3600
+GLOBAL_MAX_FAILS = 50
+GLOBAL_LOCK_SEC = 30 * 60
+
+STEPUP_WINDOW_SEC = 5 * 60
+# SSH terminal (2026-10-19): separate TOTP-only step-up, valid 10 minutes, checked by nullink-ssh.
+SSH_STEPUP_WINDOW_SEC = 10 * 60
+SSH_ALLOWED_ORIGINS = ("https://nullink.nullverse.cloud", "https://nullink.216.158.238.236.sslip.io")
+SSH_AUDIT_FILE = Path(__file__).resolve().parent / "data" / "ssh_audit.jsonl"
+MAX_SESSIONS = 50
+SESSION_TOUCH_SEC = 300
+SESSION_COOKIE_VERSION = "v2"
+
+
+def _atomic_write_json(path: Path, data, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp." + secrets.token_hex(4))
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
-        return json.loads(RATE_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"fails": 0, "locked_until": 0}
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+# ----- Single-use PIN -----
+def generate_pin() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _pin_digest(pin: str, salt: str, kdf: str | None, iterations: int | None) -> str:
+    if kdf == PIN_KDF:
+        return hashlib.pbkdf2_hmac("sha256", pin.encode(), salt.encode(),
+                                   int(iterations or PIN_KDF_ITERATIONS)).hex()
+    return hash_pin(pin, salt)  # legacy salted SHA-256 records
+
+
+def write_otp(pin: str, ttl_sec: int | None = None) -> dict:
+    """Store a hashed single-use PIN. Never writes the clear PIN anywhere."""
+    pin = str(pin or "").strip()
+    if not (pin.isdigit() and len(pin) == 6):
+        raise ValueError("PIN must be exactly 6 digits")
+    ttl = PIN_TTL_SEC if ttl_sec is None else int(ttl_sec)
+    ttl = max(60, min(ttl, 7 * 24 * 3600))
+    salt = secrets.token_hex(16)
+    now = time.time()
+    data = {
+        "v": 2,
+        "kdf": PIN_KDF,
+        "iterations": PIN_KDF_ITERATIONS,
+        "salt": salt,
+        "pin_hash": _pin_digest(pin, salt, PIN_KDF, PIN_KDF_ITERATIONS),
+        "created_at": now,
+        "expires_at": now + ttl,
+        "single_use": True,
+    }
+    with _auth_lock:
+        _atomic_write_json(OTP_FILE, data)
+        legacy_clear = SECRETS / "CURRENT_PIN.txt"
+        try:
+            legacy_clear.unlink()
+        except FileNotFoundError:
+            pass
+        reset_rate_limits()
+    return {"expires_at": data["expires_at"], "ttl_sec": ttl}
+
+
+def check_pin(code: str, now: float, consume: bool) -> bool:
+    otp = load_otp()
+    if not otp or not otp.get("pin_hash") or not otp.get("salt"):
+        return False
+    exp = otp.get("expires_at")
+    if exp and float(exp) < now:
+        return False
+    ok = hmac.compare_digest(
+        _pin_digest(code, str(otp["salt"]), otp.get("kdf"), otp.get("iterations")),
+        str(otp["pin_hash"]),
+    )
+    if ok and consume:
+        try:
+            OTP_FILE.unlink()
+        except FileNotFoundError:
+            pass
+    return ok
+
+
+# ----- Per-client + global lockout -----
+def _empty_rate() -> dict:
+    return {"v": 2, "ips": {}, "global": {"fails": [], "locked_until": 0}}
+
+
+def load_rate() -> dict:
+    try:
+        data = json.loads(RATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _empty_rate()
+    if not isinstance(data, dict) or data.get("v") != 2:
+        return _empty_rate()  # legacy single global counter is discarded
+    data.setdefault("ips", {})
+    g = data.setdefault("global", {})
+    g.setdefault("fails", [])
+    g.setdefault("locked_until", 0)
+    return data
 
 
 def save_rate(data: dict) -> None:
-    RATE_FILE.write_text(json.dumps(data), encoding="utf-8")
+    _atomic_write_json(RATE_FILE, data)
 
 
-def sign_session(exp: int) -> str:
-    payload = f"ok:{exp}"
-    sig = hmac.new(session_secret(), payload.encode(), hashlib.sha256).hexdigest()
-    return f"{payload}.{sig}"
+def reset_rate_limits() -> None:
+    with _auth_lock:
+        save_rate(_empty_rate())
+
+
+def _prune_rate(rate: dict, now: float) -> None:
+    ips = rate["ips"]
+    for ip, st in list(ips.items()):
+        last = max(float(st.get("last_fail", 0)), float(st.get("locked_until", 0)))
+        if now - last > IP_STATE_TTL_SEC:
+            del ips[ip]
+    if len(ips) > RATE_MAX_IPS:
+        keep = sorted(ips.items(), key=lambda kv: float(kv[1].get("last_fail", 0)), reverse=True)[:RATE_MAX_IPS]
+        rate["ips"] = dict(keep)
+    g = rate["global"]
+    g["fails"] = [t for t in g.get("fails", []) if now - float(t) < GLOBAL_FAIL_WINDOW_SEC]
+
+
+def rate_locked(rate: dict, ip: str, now: float) -> tuple[bool, int, str]:
+    g_until = float(rate["global"].get("locked_until", 0))
+    if g_until > now:
+        return True, int(g_until - now) + 1, "global"
+    st = rate["ips"].get(ip) or {}
+    until = float(st.get("locked_until", 0))
+    if until > now:
+        return True, int(until - now) + 1, "client"
+    return False, 0, ""
+
+
+def rate_record_failure(rate: dict, ip: str, now: float) -> dict:
+    st = rate["ips"].setdefault(ip, {"fails": 0, "level": 0, "locked_until": 0, "last_fail": 0})
+    st["fails"] = int(st.get("fails", 0)) + 1
+    st["last_fail"] = now
+    g = rate["global"]
+    g["fails"].append(now)
+    info = {"locked": False, "retry_after": 0, "attempts_left": max(0, IP_MAX_FAILS - st["fails"]), "scope": ""}
+    if st["fails"] >= IP_MAX_FAILS:
+        level = int(st.get("level", 0))
+        dur = min(IP_LOCK_BASE_SEC * (2 ** level), IP_LOCK_MAX_SEC)
+        st["locked_until"] = now + dur
+        st["level"] = level + 1
+        st["fails"] = 0
+        info.update(locked=True, retry_after=int(dur), attempts_left=0, scope="client")
+    if len(g["fails"]) >= GLOBAL_MAX_FAILS:
+        g["locked_until"] = now + GLOBAL_LOCK_SEC
+        g["fails"] = []
+        info.update(locked=True, retry_after=max(info["retry_after"], GLOBAL_LOCK_SEC), scope=info["scope"] or "global")
+    return info
+
+
+def rate_record_success(rate: dict, ip: str) -> None:
+    rate["ips"].pop(ip, None)
+
+
+def client_ip(handler: BaseHTTPRequestHandler) -> str:
+    """Real client IP. Behind Caddy the TCP peer is loopback and Caddy appends the
+    address it actually saw as the RIGHTMOST X-Forwarded-For hop; anything to the
+    left is client-supplied and untrusted."""
+    peer = handler.client_address[0]
+    if peer not in LOOPBACK_ADDRS:
+        return peer
+    values = handler.headers.get_all("X-Forwarded-For") or []
+    hops = [h.strip() for v in values for h in str(v).split(",") if h.strip()]
+    if not hops:
+        return "local"
+    cand = hops[-1].strip("[]")
+    try:
+        return str(ipaddress.ip_address(cand))
+    except ValueError:
+        return "unparsable"
+
+
+# ----- Server-side sessions -----
+def _sid_key(sid: str) -> str:
+    return hashlib.sha256(sid.encode()).hexdigest()
+
+
+def _session_sig(sid: str) -> str:
+    return hmac.new(session_secret(), b"nullink-session-v2." + sid.encode(), hashlib.sha256).hexdigest()
+
+
+def load_sessions() -> dict:
+    with _auth_lock:
+        try:
+            data = json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
+            sessions = data.get("sessions") if isinstance(data, dict) else None
+            return sessions if isinstance(sessions, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+
+def save_sessions(sessions: dict) -> None:
+    with _auth_lock:
+        _atomic_write_json(SESSIONS_FILE, {"v": 2, "sessions": sessions})
+
+
+def _prune_sessions(sessions: dict, now: float) -> dict:
+    live = {k: v for k, v in sessions.items()
+            if isinstance(v, dict) and float(v.get("expires_at", 0)) > now}
+    if len(live) > MAX_SESSIONS:
+        live = dict(sorted(live.items(), key=lambda kv: float(kv[1].get("created_at", 0)),
+                           reverse=True)[:MAX_SESSIONS])
+    return live
+
+
+def create_session(ip: str, ua: str, method: str, now: float | None = None) -> tuple[str, dict]:
+    now = time.time() if now is None else now
+    sid = secrets.token_urlsafe(32)
+    rec = {
+        "id": secrets.token_hex(6),
+        "created_at": now,
+        "expires_at": now + SESSION_TTL_SEC,
+        "last_seen_at": now,
+        "stepup_at": now,
+        "ip": str(ip)[:64],
+        "ua": str(ua or "")[:160],
+        "method": method,
+    }
+    with _auth_lock:
+        sessions = _prune_sessions(load_sessions(), now)
+        sessions[_sid_key(sid)] = rec
+        save_sessions(_prune_sessions(sessions, now))
+    return f"{SESSION_COOKIE_VERSION}.{sid}.{_session_sig(sid)}", rec
+
+
+def _session_key_from_cookie(token: str | None) -> str | None:
+    if not token or len(token) > 256:
+        return None
+    parts = token.split(".")
+    if len(parts) != 3 or parts[0] != SESSION_COOKIE_VERSION:
+        return None
+    sid, sig = parts[1], parts[2]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", sid):
+        return None
+    if not hmac.compare_digest(_session_sig(sid), sig):
+        return None
+    return _sid_key(sid)
+
+
+def get_session(token: str | None, touch: bool = False) -> dict | None:
+    key = _session_key_from_cookie(token)
+    if not key:
+        return None
+    now = time.time()
+    with _auth_lock:
+        sessions = load_sessions()
+        rec = sessions.get(key)
+        if not isinstance(rec, dict) or float(rec.get("expires_at", 0)) <= now:
+            return None
+        if touch and now - float(rec.get("last_seen_at", 0)) > SESSION_TOUCH_SEC:
+            rec["last_seen_at"] = now
+            sessions[key] = rec
+            save_sessions(_prune_sessions(sessions, now))
+    out = dict(rec)
+    out["_key"] = key
+    return out
+
+
+def mark_stepup(key: str, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    with _auth_lock:
+        sessions = load_sessions()
+        rec = sessions.get(key)
+        if not isinstance(rec, dict):
+            return False
+        rec["stepup_at"] = now
+        sessions[key] = rec
+        save_sessions(sessions)
+        return True
+
+
+def mark_ssh_stepup(key: str, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    with _auth_lock:
+        sessions = load_sessions()
+        rec = sessions.get(key)
+        if not isinstance(rec, dict) or rec.get("method") == "guest" or rec.get("guest"):
+            return False
+        rec["ssh_stepup_at"] = now
+        sessions[key] = rec
+        save_sessions(sessions)
+        return True
+
+
+def ssh_audit(event: str, **fields) -> None:
+    rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "t": round(time.time(), 3),
+           "event": event, "src": "nullink"}
+    for k, v in fields.items():
+        rec[k] = v if isinstance(v, (int, float, bool)) or v is None else \
+            "".join(ch for ch in str(v) if ch.isprintable())[:200]
+    try:
+        fd = os.open(SSH_AUDIT_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
+def revoke_session(token: str | None) -> bool:
+    key = _session_key_from_cookie(token)
+    if not key:
+        return False
+    with _auth_lock:
+        sessions = load_sessions()
+        if key not in sessions:
+            return False
+        del sessions[key]
+        save_sessions(_prune_sessions(sessions, time.time()))
+        return True
+
+
+def revoke_all_sessions() -> int:
+    with _auth_lock:
+        n = len(_prune_sessions(load_sessions(), time.time()))
+        save_sessions({})
+        return n
 
 
 def verify_session(token: str | None) -> bool:
-    if not token:
-        return False
+    return get_session(token) is not None
+
+
+
+# ---------- Guest access (owner-approved one-time guest PINs, 2026-10-14) ----------
+GUEST_FILE = DATA / "guest_access.json"
+GUEST_AUDIT_FILE = DATA / "guest_audit.jsonl"
+GUEST_SLACK_WEBHOOK_FILE = SECRETS / "slack-incoming-webhook.url"
+GUEST_LINK = "https://nullink.nullverse.cloud/#guest-access"
+GUEST_REQ_PER_IP_HOUR = 5
+GUEST_MAX_PENDING = 3
+GUEST_PENDING_TTL_SEC = 30 * 60
+GUEST_PIN_TTL_SEC = 60            # PIN valid 60 s after approval, single use
+GUEST_BLOCK_MIN = 10               # sessions run in 10-minute blocks
+GUEST_DEFAULT_SESSION_MIN = GUEST_BLOCK_MIN
+GUEST_WARN_SEC = 60                # warn owner ~1 min before a block ends
+GUEST_SCOPES = ("read", "full")
+GUEST_PIN_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+# Paths no guest may touch (any method, any scope): secrets, tokens, sessions, admin,
+# desktop/android gate, and the guest-approval surface itself.
+GUEST_OWNER_ONLY_PREFIXES = (
+    "/api/auth/tokens", "/api/auth/sessions", "/api/auth/logout-all", "/api/auth/stepup",
+    "/api/auth/totp", "/api/auth/gate", "/api/vault", "/api/desktop", "/api/admin",
+    "/api/guest", "/api/auth/guest", "/guest-audit", "/api/ssh", "/ssh",
+)
+GUEST_READ_ALLOWED_WRITES = ("/api/auth/logout",)
+# John 2026-10-14: guests see the app shell only, not chat history / files / notes.
+GUEST_HIDE_HISTORY = True
+GUEST_HISTORY_PREFIXES = ("/api/messages", "/api/files", "/api/inbox", "/api/session-memory",
+                          "/api/playground", "/api/tasks", "/uploads", "/api/replit")
+
+
+def _guest_clean(value, limit: int) -> str:
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or "")).strip()
+    return s[:limit]
+
+
+def guest_audit(event: str, **fields) -> None:
+    rec = {"ts": time.time(), "iso": iso_now(), "event": event}
+    rec.update({k: v for k, v in fields.items() if v is not None})
     try:
-        payload, sig = token.rsplit(".", 1)
-        expect = hmac.new(session_secret(), payload.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expect, sig):
-            return False
-        kind, exp_s = payload.split(":", 1)
-        if kind != "ok":
-            return False
-        return int(exp_s) >= int(time.time())
-    except (ValueError, TypeError):
+        GUEST_AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(GUEST_AUDIT_FILE), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def load_guest() -> dict:
+    with _auth_lock:
+        try:
+            data = json.loads(GUEST_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("requests", {})
+                data.setdefault("rate", {})
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+        return {"requests": {}, "rate": {}}
+
+
+def save_guest(data: dict) -> None:
+    with _auth_lock:
+        _atomic_write_json(GUEST_FILE, data)
+
+
+def _guest_prune(data: dict, now: float) -> dict:
+    reqs = data.get("requests") or {}
+    for r in reqs.values():
+        if r.get("status") == "pending" and now - float(r.get("created_at", 0)) > GUEST_PENDING_TTL_SEC:
+            r["status"] = "expired"
+            r["decided_at"] = now
+        if r.get("status") == "approved" and float(r.get("pin_expires_at", 0)) <= now:
+            r["status"] = "pin_expired"
+            r.pop("pin_hash", None)
+    # keep 7 days of history, at most 200 records
+    keep = {k: v for k, v in reqs.items() if now - float(v.get("created_at", 0)) < 7 * 86400}
+    if len(keep) > 200:
+        keep = dict(sorted(keep.items(), key=lambda kv: kv[1].get("created_at", 0), reverse=True)[:200])
+    data["requests"] = keep
+    rate = data.get("rate") or {}
+    data["rate"] = {ip: [t for t in ts if now - t < 3600] for ip, ts in rate.items()
+                    if any(now - t < 3600 for t in ts)}
+    return data
+
+
+def generate_guest_pin() -> str:
+    raw = "".join(secrets.choice(GUEST_PIN_ALPHABET) for _ in range(10))
+    return raw[:5] + "-" + raw[5:]
+
+
+def _guest_pin_norm(pin: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(pin or "").upper())
+
+
+def _guest_pin_hash(pin: str) -> str:
+    return hmac.new(session_secret(), b"nullink-guest-pin." + _guest_pin_norm(pin).encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def _guest_public(r: dict) -> dict:
+    return {k: r.get(k) for k in ("id", "name", "reason", "ip", "ua", "created_at", "status",
+                                   "decided_at", "scope", "pin_expires_at", "session_minutes",
+                                   "redeemed_at", "source")}
+
+
+def guest_notify_slack(req: dict) -> None:
+    def esc(s):
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    try:
+        url = GUEST_SLACK_WEBHOOK_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if not url.startswith("https://hooks.slack.com/"):
+        return
+    text = (f":key: Nullink guest access request *{esc(req['id'])}*\n"
+            f"From: {esc(req.get('name') or '(no name)')}\n"
+            f"Reason: {esc(req.get('reason') or '(none)')}\n"
+            f"IP: {esc(req.get('ip'))}\n"
+            f"Approve or deny: {GUEST_LINK}")
+
+    def run():
+        try:
+            rq = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),
+                                        headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(rq, timeout=8).read()
+            guest_audit("slack_notified", request_id=req["id"])
+        except Exception as e:  # noqa: BLE001
+            guest_audit("slack_notify_failed", request_id=req["id"], error=type(e).__name__)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def guest_create_request(name: str, reason: str, ip: str, ua: str, now: float | None = None):
+    """Returns (status, body). Never reveals other requests."""
+    now = time.time() if now is None else now
+    with _auth_lock:
+        data = _guest_prune(load_guest(), now)
+        hits = data["rate"].get(ip, [])
+        if len(hits) >= GUEST_REQ_PER_IP_HOUR:
+            guest_audit("request_rate_limited", ip=ip)
+            return 429, {"error": "rate_limited", "message": "Too many requests. Try again later."}
+        pending = [r for r in data["requests"].values() if r.get("status") == "pending"]
+        if len(pending) >= GUEST_MAX_PENDING:
+            guest_audit("request_rejected_full", ip=ip)
+            return 429, {"error": "too_many_pending",
+                         "message": "The owner already has several pending requests. Try again later."}
+        rid = "GR-" + "".join(secrets.choice(GUEST_PIN_ALPHABET) for _ in range(6))
+        poll = secrets.token_urlsafe(18)
+        req = {"id": rid, "name": _guest_clean(name, 80), "reason": _guest_clean(reason, 200),
+               "ip": str(ip)[:64], "ua": _guest_clean(ua, 160), "created_at": now,
+               "status": "pending", "poll_hash": hashlib.sha256(poll.encode()).hexdigest(),
+               "source": "request"}
+        data["requests"][rid] = req
+        data["rate"].setdefault(ip, []).append(now)
+        save_guest(data)
+    guest_audit("request_created", request_id=rid, ip=req["ip"], name=req["name"], reason=req["reason"])
+    guest_notify_slack(req)
+    return 201, {"ok": True, "request_id": rid, "poll_token": poll, "status": "pending",
+                 "message": "Waiting for the owner to approve. Ask them for your one-time guest PIN."}
+
+
+def _guest_opts(body: dict):
+    scope = str(body.get("scope") or "read")
+    if scope not in GUEST_SCOPES:
+        return None, "invalid_options"
+    return {"scope": scope, "session_minutes": GUEST_BLOCK_MIN}, None
+
+
+def guest_approve(rid: str, opts: dict, by: str, now: float | None = None):
+    now = time.time() if now is None else now
+    pin = generate_guest_pin()
+    with _auth_lock:
+        data = _guest_prune(load_guest(), now)
+        r = data["requests"].get(rid)
+        if not r:
+            return 404, {"error": "not_found"}
+        if r.get("status") != "pending":
+            return 409, {"error": "not_pending", "status": r.get("status")}
+        r.update({"status": "approved", "decided_at": now, "decided_by": by, "scope": opts["scope"],
+                  "session_minutes": opts["session_minutes"], "pin_hash": _guest_pin_hash(pin),
+                  "pin_expires_at": now + GUEST_PIN_TTL_SEC})
+        save_guest(data)
+    guest_audit("request_approved", request_id=rid, by=by, scope=opts["scope"],
+                pin_ttl_sec=GUEST_PIN_TTL_SEC, session_minutes=opts["session_minutes"])
+    return 200, {"ok": True, "request_id": rid, "pin": pin, "pin_expires_at": now + GUEST_PIN_TTL_SEC,
+                 "scope": opts["scope"], "session_minutes": opts["session_minutes"]}
+
+
+def guest_mint(name: str, reason: str, opts: dict, by: str, ip: str, now: float | None = None):
+    now = time.time() if now is None else now
+    rid = "GR-" + "".join(secrets.choice(GUEST_PIN_ALPHABET) for _ in range(6))
+    with _auth_lock:
+        data = _guest_prune(load_guest(), now)
+        data["requests"][rid] = {"id": rid, "name": _guest_clean(name, 80) or "Guest",
+                                 "reason": _guest_clean(reason, 200), "ip": ip, "ua": "",
+                                 "created_at": now, "status": "pending", "source": "mint"}
+        save_guest(data)
+    guest_audit("pin_minted", request_id=rid, by=by)
+    return guest_approve(rid, opts, by, now)
+
+
+def guest_deny(rid: str, by: str, now: float | None = None):
+    now = time.time() if now is None else now
+    with _auth_lock:
+        data = _guest_prune(load_guest(), now)
+        r = data["requests"].get(rid)
+        if not r:
+            return 404, {"error": "not_found"}
+        if r.get("status") not in ("pending", "approved"):
+            return 409, {"error": "not_pending", "status": r.get("status")}
+        r["status"] = "denied"
+        r["decided_at"] = now
+        r["decided_by"] = by
+        r.pop("pin_hash", None)
+        save_guest(data)
+    guest_audit("request_denied", request_id=rid, by=by)
+    return 200, {"ok": True, "request_id": rid, "status": "denied"}
+
+
+def guest_redeem_pin(pin: str, now: float | None = None):
+    """Consume a guest PIN. Returns the request record (copy) or None."""
+    now = time.time() if now is None else now
+    norm = _guest_pin_norm(pin)
+    if len(norm) != 10:
+        return None
+    h = _guest_pin_hash(norm)
+    with _auth_lock:
+        data = _guest_prune(load_guest(), now)
+        hit = None
+        for r in data["requests"].values():
+            ph = r.get("pin_hash")
+            if r.get("status") == "approved" and ph and hmac.compare_digest(ph, h):
+                hit = r
+                break
+        if not hit:
+            save_guest(data)
+            return None
+        hit["status"] = "redeemed"
+        hit["redeemed_at"] = now
+        hit.pop("pin_hash", None)
+        save_guest(data)
+        return dict(hit)
+
+
+def create_guest_session(req: dict, ip: str, ua: str, now: float | None = None) -> tuple[str, dict]:
+    now = time.time() if now is None else now
+    sid = secrets.token_urlsafe(32)
+    minutes = int(req.get("session_minutes") or GUEST_DEFAULT_SESSION_MIN)
+    rec = {"id": secrets.token_hex(6), "created_at": now, "expires_at": now + minutes * 60,
+           "last_seen_at": now, "stepup_at": 0, "ip": str(ip)[:64], "ua": str(ua or "")[:160],
+           "method": "guest", "label": "guest", "guest": True,
+           "scope": req.get("scope") if req.get("scope") in GUEST_SCOPES else "read",
+           "guest_name": req.get("name") or "Guest", "request_id": req.get("id")}
+    with _auth_lock:
+        sessions = _prune_sessions(load_sessions(), now)
+        sessions[_sid_key(sid)] = rec
+        save_sessions(_prune_sessions(sessions, now))
+    with _auth_lock:
+        data = load_guest()
+        r = data["requests"].get(req.get("id"))
+        if r:
+            r["session_id"] = rec["id"]
+            save_guest(data)
+    return f"{SESSION_COOKIE_VERSION}.{sid}.{_session_sig(sid)}", rec
+
+
+def list_guest_sessions(now: float | None = None) -> list:
+    now = time.time() if now is None else now
+    out = []
+    for rec in _prune_sessions(load_sessions(), now).values():
+        if rec.get("method") == "guest":
+            out.append({k: rec.get(k) for k in ("id", "created_at", "expires_at", "last_seen_at", "ip",
+                                                "ua", "scope", "guest_name", "request_id", "label",
+                                                "extensions")})
+            out[-1]["expiring_soon"] = float(rec.get("expires_at", 0)) - now <= GUEST_WARN_SEC
+    out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+    return out
+
+
+def end_guest_sessions(session_id: str | None = None) -> int:
+    with _auth_lock:
+        sessions = load_sessions()
+        drop = [k for k, v in sessions.items() if isinstance(v, dict) and v.get("method") == "guest"
+                and (session_id is None or v.get("id") == session_id)]
+        for k in drop:
+            del sessions[k]
+        save_sessions(_prune_sessions(sessions, time.time()))
+        return len(drop)
+
+
+def extend_guest_session(session_id: str, by: str, now: float | None = None):
+    now = time.time() if now is None else now
+    with _auth_lock:
+        sessions = load_sessions()
+        for k, v in sessions.items():
+            if isinstance(v, dict) and v.get("method") == "guest" and v.get("id") == session_id \
+                    and float(v.get("expires_at", 0)) > now:
+                v["expires_at"] = float(v["expires_at"]) + GUEST_BLOCK_MIN * 60
+                v["extensions"] = int(v.get("extensions") or 0) + 1
+                v.pop("warned_for", None)
+                sessions[k] = v
+                save_sessions(sessions)
+                guest_audit("session_extended", by=by, session_id=session_id,
+                            new_expires_at=v["expires_at"], extensions=v["extensions"])
+                return v
+    return None
+
+
+def _guest_slack(text: str, event: str, **kw) -> None:
+    try:
+        url = GUEST_SLACK_WEBHOOK_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if not url.startswith("https://hooks.slack.com/"):
+        return
+    try:
+        rq = urllib.request.Request(url, data=json.dumps({"text": text}).encode(),
+                                    headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(rq, timeout=8).read()
+        guest_audit(event + "_slack", **kw)
+    except Exception as e:  # noqa: BLE001
+        guest_audit(event + "_slack_failed", error=type(e).__name__, **kw)
+
+
+def guest_watch_tick(now: float | None = None, notify=True) -> list:
+    """Warn once per block ~1 min before expiry; audit expiries. Returns warned ids."""
+    now = time.time() if now is None else now
+    warned, expired = [], []
+    with _auth_lock:
+        sessions = load_sessions()
+        changed = False
+        for k, v in list(sessions.items()):
+            if not isinstance(v, dict) or v.get("method") != "guest":
+                continue
+            exp = float(v.get("expires_at", 0))
+            if exp <= now:
+                expired.append(v.get("id"))
+                del sessions[k]
+                changed = True
+            elif exp - now <= GUEST_WARN_SEC and v.get("warned_for") != exp:
+                v["warned_for"] = exp
+                warned.append(dict(v))
+                changed = True
+        if changed:
+            save_sessions(sessions)
+    for sid in expired:
+        guest_audit("session_expired", session_id=sid)
+    for v in warned:
+        guest_audit("session_expiring_warned", session_id=v.get("id"))
+        if notify:
+            name = str(v.get("guest_name") or "Guest").replace("<", "&lt;").replace(">", "&gt;")
+            threading.Thread(target=slack_session_warn, daemon=True, args=(v,)).start()
+    return [v.get("id") for v in warned]
+
+
+def guest_watch_start() -> None:
+    def loop():
+        while True:
+            try:
+                guest_watch_tick()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                slack_guest_sweep()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(10)
+    threading.Thread(target=loop, daemon=True, name="guest-watch").start()
+
+
+# ---------- Guest access via Slack DM buttons (Morc bot, 2026-10-14) ----------
+# John: alert + Approve/Deny buttons go to his Slack DM (not #general); PIN is DMed; Extend/Close too.
+# Webhook (#general) is only a fallback when the DM post fails.
+SLACK_OWNER_UID = os.environ.get("NULLINK_SLACK_OWNER_UID", "U0C2TTY5TT3")
+SLACK_API_BASE = os.environ.get("SLACK_API_BASE", "https://slack.com/api").rstrip("/")
+SLACK_REPLAY_SEC = 300
+SLACK_CRED_FILES = {"token": "slack_morc_token", "signing_secret": "slack_morc_signing_secret"}
+
+
+def _slack_cred(kind: str) -> str | None:
+    d = os.environ.get("CREDENTIALS_DIRECTORY")
+    paths = [Path(d) / SLACK_CRED_FILES[kind]] if d else []
+    paths.append(SECRETS / SLACK_CRED_FILES[kind])
+    for p in paths:
+        try:
+            v = p.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+        except OSError:
+            continue
+    return None
+
+
+def slack_verify(secret: str | None, ts: str | None, sig: str | None, body: bytes, now: float | None = None) -> bool:
+    if not secret or not ts or not sig:
         return False
+    now = time.time() if now is None else now
+    try:
+        if abs(now - int(ts)) > SLACK_REPLAY_SEC:
+            return False
+    except ValueError:
+        return False
+    want = "v0=" + hmac.new(secret.encode(), b"v0:" + ts.encode() + b":" + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(want, sig)
 
 
+_SLACK_BACKOFF_UNTIL = 0.0
+
+
+def slack_call(method: str, params: dict) -> dict:
+    tok = _slack_cred("token")
+    if not tok:
+        return {"ok": False, "error": "no_token"}
+    rq = urllib.request.Request(f"{SLACK_API_BASE}/{method}", data=json.dumps(params).encode(),
+                                headers={"Authorization": f"Bearer {tok}",
+                                         "Content-Type": "application/json; charset=utf-8"}, method="POST")
+    global _SLACK_BACKOFF_UNTIL
+    if method == "chat.update" and time.time() < _SLACK_BACKOFF_UNTIL:
+        return {"ok": False, "error": "ratelimited_backoff"}
+    try:
+        with urllib.request.urlopen(rq, timeout=8) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            try:
+                wait = float(e.headers.get("Retry-After") or 30)
+            except ValueError:
+                wait = 30.0
+            _SLACK_BACKOFF_UNTIL = time.time() + max(1.0, wait)
+            guest_audit("slack_rate_limited", method=method, retry_after=wait)
+            return {"ok": False, "error": "ratelimited"}
+        return {"ok": False, "error": f"HTTP{e.code}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": type(e).__name__}
+
+
+def _slack_dm_channel() -> str | None:
+    r = slack_call("conversations.open", {"users": SLACK_OWNER_UID})
+    return ((r.get("channel") or {}).get("id")) if r.get("ok") else None
+
+
+def _sesc(s) -> str:
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _guest_req_text(req: dict) -> str:
+    return (f":key: *Nullink guest access request* `{_sesc(req['id'])}`\n"
+            f"*From:* {_sesc(req.get('name') or '(no name)')}\n"
+            f"*Reason:* {_sesc(req.get('reason') or '(none)')}\n"
+            f"*IP:* {_sesc(req.get('ip'))}")
+
+
+_SLACK_STATUS_LINE = {
+    "approved": ":white_check_mark: Approved by John — PIN sent below (valid 60 s).",
+    "redeemed": ":white_check_mark: Approved by John — PIN used.",
+    "pin_expired": ":white_check_mark: Approved by John — PIN expired unused.",
+    "denied": ":no_entry: Denied.",
+    "expired": ":hourglass: Expired (not answered within 30 min).",
+}
+
+
+def guest_request_blocks(req: dict, status: str = "pending") -> list:
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": _guest_req_text(req)}}]
+    if status == "pending":
+        blocks.append({"type": "actions", "block_id": "guest_req", "elements": [
+            {"type": "button", "action_id": "guest_approve", "style": "primary", "value": req["id"],
+             "text": {"type": "plain_text", "text": "Approve (read-only)"}},
+            {"type": "button", "action_id": "guest_deny", "style": "danger", "value": req["id"],
+             "text": {"type": "plain_text", "text": "Deny"}}]})
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
+                       "text": f"The one-time PIN will be DMed here, valid 60 s. Or use {GUEST_LINK}"}]})
+    else:
+        line = (":white_check_mark: Approved by John — " + _sesc(_guest_used_line(req))) if status == "redeemed" \
+            else _SLACK_STATUS_LINE.get(status, _sesc(status))
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": line}]})
+    return blocks
+
+
+def _guest_set_fields(rid: str, **fields) -> None:
+    with _auth_lock:
+        data = load_guest()
+        r = data["requests"].get(rid)
+        if r is not None:
+            r.update(fields)
+            save_guest(data)
+
+
+def _guest_webhook_fallback(text: str, event: str, **kw) -> None:
+    _guest_slack(text, event, **kw)
+
+
+def guest_notify_slack(req: dict) -> None:  # noqa: F811 (replaces the #general webhook alert)
+    def run():
+        ch = _slack_dm_channel()
+        r = slack_call("chat.postMessage", {"channel": ch, "text": f"Nullink guest access request {req['id']}",
+                                            "blocks": guest_request_blocks(req)}) if ch else {"ok": False,
+                                                                                              "error": "dm_open_failed"}
+        if r.get("ok"):
+            _guest_set_fields(req["id"], slack_channel=r.get("channel"), slack_ts=r.get("ts"),
+                              slack_state="pending")
+            guest_audit("slack_dm_notified", request_id=req["id"])
+            return
+        guest_audit("slack_dm_failed", request_id=req["id"], error=str(r.get("error"))[:60])
+        _guest_webhook_fallback(
+            f":key: Nullink guest access request *{_sesc(req['id'])}* from {_sesc(req.get('name') or '(no name)')}. "
+            f"(Slack DM failed.) Approve or deny: {GUEST_LINK}", "request_fallback", request_id=req["id"])
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _slack_update_request(rid: str, status: str) -> None:
+    data = load_guest()
+    r = data["requests"].get(rid)
+    if not r or not r.get("slack_ts") or r.get("slack_state") == status:
+        return
+    res = slack_call("chat.update", {"channel": r["slack_channel"], "ts": r["slack_ts"],
+                                     "text": f"Nullink guest request {rid}: {status}",
+                                     "blocks": guest_request_blocks(r, status)})
+    if res.get("ok"):
+        _guest_set_fields(rid, slack_state=status)
+
+
+def _et_time(ts: float) -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        import datetime as _dt
+        d = _dt.datetime.fromtimestamp(ts, ZoneInfo("America/New_York"))
+        return d.strftime("%I:%M:%S %p").lstrip("0") + " ET"
+    except Exception:  # noqa: BLE001
+        return time.strftime("%H:%M:%S UTC", time.gmtime(ts))
+
+
+def _guest_used_line(r: dict) -> str:
+    return (f"Used at {_et_time(float(r.get('redeemed_at') or time.time()))} by "
+            f"{r.get('name') or 'Guest'} from {r.get('redeemed_ip') or 'unknown IP'}")
+
+
+def slack_pin_finalize(rid: str) -> None:
+    """Edit the PIN-only DM once the PIN is used or expired. State is persisted, so this
+    is driven by the redeem handler (immediately) and the 10 s sweep (expiry, restarts)."""
+    with _auth_lock:
+        data = _guest_prune(load_guest(), time.time())
+        save_guest(data)
+    r = data["requests"].get(rid) or {}
+    st = r.get("status")
+    if not r.get("slack_pin_ts") or r.get("slack_pin_final") or st in ("pending", "approved"):
+        return
+    text = _guest_used_line(r) if st == "redeemed" else "expired"
+    res = slack_call("chat.update", {"channel": r.get("slack_pin_channel") or r.get("slack_channel"),
+                                     "ts": r["slack_pin_ts"], "text": text})
+    if r.get("slack_ctx_ts"):
+        slack_call("chat.update", {"channel": r.get("slack_pin_channel") or r.get("slack_channel"),
+                                   "ts": r["slack_ctx_ts"], "text": _ctx_final_text(r)})
+    if res.get("ok"):
+        _guest_set_fields(rid, slack_pin_final=True)
+        guest_audit("slack_pin_dm_finalized", request_id=rid, outcome="used" if st == "redeemed" else "expired",
+                    ip=r.get("redeemed_ip"))
+    _slack_update_request(rid, st)
+
+
+def _mmss(sec: float) -> str:
+    sec = max(0, int(sec))
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+def _ctx_text(rid: str, expires_at: float, now: float | None = None) -> str:
+    now = time.time() if now is None else now
+    return (f":white_check_mark: Approved {rid}. PIN below · Expires in {_mmss(expires_at - now)} "
+            f"(at {_et_time(expires_at)}). One-time; read-only guest session, 10 min.")
+
+
+def _ctx_final_text(r: dict) -> str:
+    if r.get("status") == "redeemed":
+        return f":white_check_mark: Approved {r['id']} · PIN {_guest_used_line(r)}."
+    if r.get("status") == "denied":
+        return f":no_entry: {r['id']} denied · PIN cancelled."
+    return f":hourglass: Approved {r['id']} · PIN expired unused."
+
+
+def _slack_pin_dm(rid: str, channel: str, pin: str, expires_at: float) -> None:
+    hhmm = _et_time(expires_at)
+    c = slack_call("chat.postMessage", {"channel": channel, "text": _ctx_text(rid, expires_at)})
+    if c.get("ok"):
+        _guest_set_fields(rid, slack_ctx_ts=c.get("ts"), slack_ctx_at=time.time())
+    # PIN-only message (plain text, no formatting) so long-press copy grabs just the code.
+    r = slack_call("chat.postMessage", {"channel": channel, "text": pin, "mrkdwn": False})
+    if not r.get("ok"):
+        guest_audit("slack_pin_dm_failed", request_id=rid, error=str(r.get("error"))[:60])
+        return
+    guest_audit("slack_pin_dm_sent", request_id=rid)
+    _guest_set_fields(rid, slack_pin_ts=r.get("ts"), slack_pin_channel=channel)
+
+
+# ---------- MCP gateway approvals (Phase 1 test copy, 2026-10-17) ----------
+# John's signed clicks on mcpgw_* buttons are forwarded to the separate approval service
+# (127.0.0.1:8777). Additive only: guest_* / share_* handling is untouched.
+MCPGW_FORWARD_URL = os.environ.get("MCPGW_FORWARD_URL", "http://127.0.0.1:8777/internal/slack-action")
+MCPGW_FORWARD_SECRET_FILE = os.environ.get("MCPGW_FORWARD_SECRET_FILE", "/etc/mcp-gateway/slack_forward_secret")
+
+
+def _mcpgw_forward(aid: str, val: str, user: str, channel, msg_ts) -> dict:
+    try:
+        secret = Path(MCPGW_FORWARD_SECRET_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        secret = ""
+    if not secret:
+        guest_audit("mcpgw_forward_failed", why="no_secret", action=aid[:30])
+        return {"ok": False, "error": "mcpgw_unconfigured"}
+    body = json.dumps({"action_id": aid, "value": val[:40], "user": user, "channel": channel, "ts": msg_ts}).encode()
+    req = urllib.request.Request(MCPGW_FORWARD_URL, data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "X-Mcpgw-Forward": secret})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode("utf-8") or "{}")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        guest_audit("mcpgw_forward_failed", why=type(e).__name__, action=aid[:30])
+        return {"ok": False, "error": "mcpgw_unreachable"}
+
+
+def slack_handle_interaction(payload: dict) -> dict:
+    """Process one block_actions payload. Returns a small result dict (for tests/audit)."""
+    user = ((payload.get("user") or {}).get("id")) or ""
+    actions = payload.get("actions") or []
+    if payload.get("type") != "block_actions" or not actions:
+        return {"ok": False, "error": "unsupported"}
+    act = actions[0]
+    aid, val = act.get("action_id"), str(act.get("value") or "")
+    channel = ((payload.get("channel") or {}).get("id")) or ((payload.get("container") or {}).get("channel_id"))
+    msg_ts = ((payload.get("container") or {}).get("message_ts")) or ((payload.get("message") or {}).get("ts"))
+    if str(aid).startswith("mcpgw_"):
+        # Signed clicks on MCP gateway buttons are forwarded for any Slack user: the approval service
+        # verifies the clicker (stage 2: John only; stage 1: the namespace admin's mapped Slack id).
+        return _mcpgw_forward(str(aid), val, user, channel, msg_ts)
+    if user != SLACK_OWNER_UID:
+        guest_audit("slack_click_rejected", slack_user=user[:20], action=str(aid)[:30])
+        return {"ok": False, "error": "wrong_user"}
+    by = "slack:" + user
+    if str(aid).startswith("share_"):
+        return share_links.slack_action(aid, val, by, channel, msg_ts)
+    if aid in ("guest_approve", "guest_deny") and re.match(r"^GR-[A-Z0-9]{6}$", val):
+        if aid == "guest_deny":
+            st, out = guest_deny(val, by)
+            if st == 200:
+                guest_audit("slack_denied", request_id=val, by=by)
+                _slack_update_request(val, "denied")
+            else:
+                _slack_update_request(val, out.get("status") or "expired")
+            return {"ok": st == 200, "status": out.get("status"), "code": st}
+        st, out = guest_approve(val, {"scope": "read", "session_minutes": GUEST_BLOCK_MIN}, by)
+        if st == 200:
+            guest_audit("slack_approved", request_id=val, by=by)
+            _slack_update_request(val, "approved")
+            if channel:
+                _slack_pin_dm(val, channel, out["pin"], out["pin_expires_at"])
+            return {"ok": True, "status": "approved", "code": 200}
+        _slack_update_request(val, out.get("status") or "expired")
+        guest_audit("slack_click_noop", request_id=val, by=by, status=out.get("status"))
+        return {"ok": False, "status": out.get("status"), "code": st}
+    if aid in ("guest_extend", "guest_close") and re.match(r"^[0-9a-f]{12}$", val):
+        if aid == "guest_extend":
+            v = extend_guest_session(val, by)
+            line = (f":heavy_plus_sign: Extended by John — now ends "
+                    f"{time.strftime('%H:%M', time.localtime(v['expires_at']))}.") if v else \
+                ":hourglass: Session already ended."
+        else:
+            n = end_guest_sessions(val)
+            guest_audit("session_ended", by=by, session_id=val, count=n)
+            v = n
+            line = ":x: Closed by John." if n else ":hourglass: Session already ended."
+            if n:
+                _sess_track(val, {"closed_by_john": True})
+        tr = (load_guest().get("slack_sessions") or {}).get(val) or {}
+        if tr.get("ts"):
+            slack_session_status_tick(force={val})
+        if channel and msg_ts and msg_ts != tr.get("ts"):
+            slack_call("chat.update", {"channel": channel, "ts": msg_ts, "text": line,
+                                       "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text":
+                                                   (payload.get("message") or {}).get("text") or "Guest session"}},
+                                                  {"type": "context", "elements": [{"type": "mrkdwn", "text": line}]}]})
+        return {"ok": bool(v), "status": aid}
+    return {"ok": False, "error": "unknown_action"}
+
+
+def _sess_blocks(text: str, sid: str, buttons: bool) -> list:
+    b = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    if buttons:
+        b.append({"type": "actions", "block_id": "guest_sess", "elements": [
+            {"type": "button", "action_id": "guest_extend", "style": "primary", "value": sid,
+             "text": {"type": "plain_text", "text": "Extend +10 min"}},
+            {"type": "button", "action_id": "guest_close", "style": "danger", "value": sid,
+             "text": {"type": "plain_text", "text": "Close"}}]})
+    return b
+
+
+def _sess_text(v: dict, now: float, warn: bool = False) -> str:
+    left = float(v.get("expires_at", 0)) - now
+    mins = max(0, int((left + 59) // 60))
+    scope = "read-only" if (v.get("scope") or "read") == "read" else "full access"
+    t = (f":busts_in_silhouette: Guest session ({scope}) for *{_sesc(v.get('guest_name') or 'Guest')}* · "
+         f"{mins} min left (ends {_et_time(float(v.get('expires_at', 0)))})")
+    if warn or left <= GUEST_WARN_SEC:
+        t = ":hourglass: " + t + " — ending soon: Extend or Close?"
+    return t
+
+
+def slack_session_status_tick(now: float | None = None, force: set | None = None) -> None:
+    """One DM status message per active guest session, refreshed every 60 s (or immediately for
+    ids in `force`); finalized without buttons once the session ends. ts persisted in guest_access.json."""
+    now = time.time() if now is None else now
+    force = force or set()
+    active = {v.get("id"): v for v in _prune_sessions(load_sessions(), now).values()
+              if isinstance(v, dict) and v.get("method") == "guest"}
+    track = load_guest().get("slack_sessions") or {}
+    for sid, v in active.items():
+        t = track.get(sid)
+        if t and t.get("final"):
+            continue
+        if not t:
+            ch = _slack_dm_channel()
+            r = slack_call("chat.postMessage", {"channel": ch, "text": _sess_text(v, now),
+                                                "blocks": _sess_blocks(_sess_text(v, now), sid, True)}) if ch else {}
+            if r.get("ok"):
+                _sess_track(sid, {"channel": r.get("channel"), "ts": r.get("ts"), "last": now,
+                                  "name": v.get("guest_name")})
+                guest_audit("slack_session_status_posted", session_id=sid)
+            continue
+        if sid in force or now - float(t.get("last", 0)) >= 60:
+            txt = _sess_text(v, now)
+            r = slack_call("chat.update", {"channel": t["channel"], "ts": t["ts"], "text": txt,
+                                           "blocks": _sess_blocks(txt, sid, True)})
+            if r.get("ok") or r.get("error") not in ("ratelimited", "ratelimited_backoff"):
+                _sess_track(sid, {"last": now})
+    for sid, t in track.items():
+        if sid in active or t.get("final") or not t.get("ts"):
+            continue
+        txt = f":white_circle: Guest session for *{_sesc(t.get('name') or 'Guest')}* ended at {_et_time(now)}."
+        if t.get("closed_by_john"):
+            txt = f":x: Guest session for *{_sesc(t.get('name') or 'Guest')}* closed by John at {_et_time(now)}."
+        r = slack_call("chat.update", {"channel": t["channel"], "ts": t["ts"], "text": txt,
+                                       "blocks": _sess_blocks(txt, sid, False)})
+        if r.get("ok") or r.get("error") not in ("ratelimited", "ratelimited_backoff"):
+            _sess_track(sid, {"final": True, "last": now})
+
+
+def _sess_track(sid: str, fields: dict) -> None:
+    with _auth_lock:
+        data = load_guest()
+        tr = data.setdefault("slack_sessions", {})
+        tr.setdefault(sid, {}).update(fields)
+        cutoff = time.time() - 86400
+        data["slack_sessions"] = {k: x for k, x in tr.items() if not x.get("final") or x.get("last", 0) > cutoff}
+        save_guest(data)
+
+
+def slack_ctx_countdown_tick(now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    for rid, r in (load_guest().get("requests") or {}).items():
+        if r.get("status") == "approved" and r.get("slack_ctx_ts") and not r.get("slack_pin_final") \
+                and float(r.get("pin_expires_at", 0)) > now and now - float(r.get("slack_ctx_at", 0)) >= 9.5:
+            res = slack_call("chat.update", {"channel": r.get("slack_pin_channel") or r.get("slack_channel"),
+                                             "ts": r["slack_ctx_ts"], "text": _ctx_text(rid, r["pin_expires_at"], now)})
+            if res.get("ok"):
+                _guest_set_fields(rid, slack_ctx_at=now)
+
+
+def slack_session_warn(v: dict) -> None:
+    if (load_guest().get("slack_sessions") or {}).get(v.get("id"), {}).get("ts"):
+        slack_session_status_tick(force={v.get("id")})  # reuse the status message (now says ending soon)
+        guest_audit("session_expiring_slack_dm", session_id=v.get("id"), reused=True)
+        return
+    _slack_session_warn_post(v)
+
+
+def _slack_session_warn_post(v: dict) -> None:
+    name = _sesc(v.get("guest_name") or "Guest")
+    text = f":hourglass: Nullink guest session *{name}* (`{v.get('id')}`) ends in about 1 minute."
+    ch = _slack_dm_channel()
+    r = slack_call("chat.postMessage", {"channel": ch, "text": text, "blocks": [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {"type": "actions", "block_id": "guest_sess", "elements": [
+            {"type": "button", "action_id": "guest_extend", "style": "primary", "value": v.get("id"),
+             "text": {"type": "plain_text", "text": "Extend +10 min"}},
+            {"type": "button", "action_id": "guest_close", "style": "danger", "value": v.get("id"),
+             "text": {"type": "plain_text", "text": "Close"}}]}]}) if ch else {"ok": False}
+    if r.get("ok"):
+        guest_audit("session_expiring_slack_dm", session_id=v.get("id"))
+    else:
+        _guest_slack(text + f" Extend (+10 min) or Close: {GUEST_LINK}", "session_expiring",
+                     session_id=v.get("id"))
+
+
+def slack_guest_sweep(now: float | None = None) -> None:
+    """Reflect expiries / Nullink-side decisions on the Slack DM alert (removes stale buttons)."""
+    now = time.time() if now is None else now
+    with _auth_lock:
+        data = _guest_prune(load_guest(), now)
+        save_guest(data)
+    for rid, r in data["requests"].items():
+        st = r.get("status")
+        if r.get("slack_ts") and st != "pending" and r.get("slack_state") != st and not \
+                (st == "approved" and r.get("slack_state") == "approved"):
+            _slack_update_request(rid, st)
+        if r.get("slack_pin_ts") and not r.get("slack_pin_final") and st not in ("pending", "approved"):
+            slack_pin_finalize(rid)
+    slack_ctx_countdown_tick(now)
+    slack_session_status_tick(now)
+
+
+# ---------- Guest audit view (owner-only, 2026-10-14) ----------
+GUEST_AUDIT_LABELS = {
+    "request_created": "Requested", "pin_minted": "PIN created in Nullink", "slack_approved": "Approved via Slack",
+    "request_denied": "Denied", "slack_denied": "Denied via Slack", "slack_pin_dm_sent": "PIN sent (Slack DM)",
+    "redeemed": "PIN used", "redeem_failed": "Wrong/expired PIN tried", "session_extended": "Session extended",
+    "session_ended": "Closed", "sessions_ended_all": "All sessions closed", "session_expired": "Ended (time up)",
+    "slack_click_rejected": "Rejected click (not John)", "slack_bad_signature": "Bad signature",
+    "slack_click_noop": "Click on already-handled request", "slack_dm_notified": "Alert sent (Slack DM)",
+    "slack_notified": "Alert sent (#general webhook)", "slack_dm_failed": "Slack DM failed",
+    "request_fallback_slack": "Alert sent (#general fallback)", "slack_pin_dm_failed": "PIN DM failed",
+    "session_expiring_warned": "Ending-soon warning", "session_expiring_slack_dm": "Ending-soon warning (Slack)",
+    "session_expiring_slack": "Ending-soon warning (#general)", "slack_session_status_posted": "Session status posted (Slack)",
+    "request_rate_limited": "Request rate-limited", "request_rejected_full": "Request rejected (too many pending)",
+    "guest_blocked": "Guest blocked (forbidden action)", "guest_history_hidden": "Guest blocked (history hidden)",
+    "slack_rate_limited": "Slack rate-limited",
+}
+GUEST_AUDIT_FIELDS = ("iso", "ts", "event", "label", "request_id", "name", "ip", "by", "actor", "scope",
+                      "session_id", "outcome", "path", "method", "error", "count", "extensions", "slack_user", "detail")
+
+
+def _guest_mask(v) -> str:
+    n = _guest_pin_norm(v)
+    return (n[:5] + "-•••••") if n else "•••••"
+
+
+def _guest_actor(rec: dict) -> str:
+    by = str(rec.get("by") or "")
+    if by.startswith("slack:"):
+        return "John (Slack)" if by == "slack:" + SLACK_OWNER_UID else "Slack " + by[6:]
+    if by.startswith("owner:"):
+        return "John (Nullink)"
+    ev = rec.get("event") or ""
+    if ev in ("request_created", "redeemed", "redeem_failed", "guest_blocked", "guest_history_hidden"):
+        return "Guest"
+    if ev in ("slack_click_rejected",):
+        return "Slack " + str(rec.get("slack_user") or "?")
+    return "System"
+
+
+def guest_audit_query(params: dict, max_rows: int = 5000) -> dict:
+    def g(k):
+        return str((params.get(k) or [""])[0] if isinstance(params.get(k), list) else (params.get(k) or "")).strip()
+    reqs = (load_guest().get("requests") or {})
+    sess2req = {q.get("session_id"): rid for rid, q in reqs.items() if q.get("session_id")}
+    rows = []
+    try:
+        lines = GUEST_AUDIT_FILE.read_text(encoding="utf-8").splitlines()[-50000:]
+    except OSError:
+        lines = []
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(r, dict):
+            continue
+        ev = str(r.get("event") or "")
+        rid = r.get("request_id") or sess2req.get(r.get("session_id"))
+        req = reqs.get(rid) or {}
+        if ev == "slack_pin_dm_finalized":
+            label = "PIN used (Slack DM updated)" if r.get("outcome") == "used" else "PIN expired"
+        elif ev == "request_approved":
+            label = "Approved via Slack" if str(r.get("by", "")).startswith("slack:") else "Approved via Nullink"
+        else:
+            label = GUEST_AUDIT_LABELS.get(ev, ev.replace("_", " ").capitalize())
+        out = {"iso": r.get("iso"), "ts": r.get("ts"), "event": ev, "label": label, "request_id": rid,
+               "name": r.get("name") or req.get("name"), "ip": r.get("ip") or (req.get("redeemed_ip") if ev == "redeemed" else None) or (req.get("ip") if ev == "request_created" else None),
+               "by": r.get("by"), "actor": _guest_actor(r), "scope": r.get("scope") or (req.get("scope") if ev in ("request_approved", "redeemed") else None),
+               "session_id": r.get("session_id"), "outcome": r.get("outcome"), "path": r.get("path"),
+               "method": r.get("method"), "error": r.get("error"), "count": r.get("count"),
+               "extensions": r.get("extensions"), "slack_user": r.get("slack_user")}
+        for k, v in r.items():  # never expose a PIN / secret even if one were ever logged
+            if any(w in k.lower() for w in ("pin", "secret", "token", "poll", "hash", "cookie")) and v \
+                    and k not in ("pin_ttl_sec",):
+                out["detail"] = (out.get("detail") or "") + f"{k}={_guest_mask(v)} "
+        rows.append({k: out.get(k) for k in GUEST_AUDIT_FIELDS if out.get(k) not in (None, "")})
+    f_rid, f_ev, f_q = g("request_id").upper(), g("event"), g("q").lower()
+    f_from, f_to = g("from"), g("to")
+    def keep(x):
+        if f_rid and str(x.get("request_id") or "").upper() != f_rid:
+            return False
+        if f_ev and f_ev not in (x.get("event"), x.get("label")):
+            return False
+        d = str(x.get("iso") or "")[:10]
+        if f_from and d < f_from or f_to and d > f_to:
+            return False
+        if f_q and f_q not in json.dumps(x, ensure_ascii=False).lower():
+            return False
+        return True
+    rows = [x for x in rows if keep(x)]
+    rows.sort(key=lambda x: float(x.get("ts") or 0), reverse=True)
+    total = len(rows)
+    try:
+        limit = max(1, min(max_rows, int(g("limit") or 200)))
+        offset = max(0, int(g("offset") or 0))
+    except ValueError:
+        limit, offset = 200, 0
+    page = rows[offset:offset + limit]
+    groups = {}
+    for rid in {x.get("request_id") for x in page if x.get("request_id")}:
+        q = reqs.get(rid) or {}
+        groups[rid] = {k: q.get(k) for k in ("name", "reason", "ip", "status", "scope", "source", "created_at",
+                                              "decided_by", "redeemed_at", "redeemed_ip", "session_id")
+                       if q.get(k) not in (None, "")}
+    events = sorted({x.get("label") for x in rows})
+    return {"ok": True, "total": total, "offset": offset, "limit": limit, "rows": page, "requests": groups,
+            "labels": events}
+
+
+def guest_audit_csv(rows: list) -> bytes:
+    import csv
+    buf = io.StringIO()
+    cols = ("time_et", "label", "event", "request_id", "name", "ip", "actor", "scope", "session_id", "outcome", "detail")
+    w = csv.writer(buf)
+    w.writerow(cols)
+    for r in rows:
+        te = _et_time(float(r.get("ts") or 0))
+        try:
+            from zoneinfo import ZoneInfo
+            import datetime as _dt
+            te = _dt.datetime.fromtimestamp(float(r.get("ts") or 0), ZoneInfo("America/New_York")).strftime("%Y-%m-%d %I:%M:%S %p ET")
+        except Exception:  # noqa: BLE001
+            pass
+        vals = [te] + [r.get(c, "") for c in cols[1:]]
+        w.writerow([("'" + str(v)) if str(v)[:1] in "=+-@" else v for v in vals])
+    return buf.getvalue().encode("utf-8")
+
+
+def guest_path_blocked(method: str, path: str, scope: str) -> bool:
+    if any(path == p or path.startswith(p + "/") or path.startswith(p) for p in GUEST_OWNER_ONLY_PREFIXES):
+        return True
+    if method != "GET" and scope != "full" and path not in GUEST_READ_ALLOWED_WRITES:
+        return True
+    return False
 
 
 # ---------- Scoped Bearer tokens (agent auth) ----------
@@ -1225,7 +2588,7 @@ def ping_has_change_for_sessions(allowed: list[str] | None) -> tuple[bool, list[
                 if not isinstance(d, dict):
                     continue
                 sid = str(d.get("session_id") or "morc")
-                if sid not in allowed_set:
+                if sid not in allowed_set or sid in BRIDGE_SESSIONS:
                     continue
                 if d.get("role") == "user":
                     newest = d
@@ -1327,8 +2690,14 @@ def append_message(role: str, text: str, session_id: str = "morc") -> dict:
 
 
 def is_localhost(handler: BaseHTTPRequestHandler) -> bool:
-    host = handler.client_address[0]
-    return host in ("127.0.0.1", "::1", "localhost")
+    """True only for direct local tools: loopback peer AND no proxy headers.
+    Everything relayed by Caddy carries X-Forwarded-* and is rejected."""
+    if handler.client_address[0] not in LOOPBACK_ADDRS:
+        return False
+    for name in PROXY_HEADERS:
+        if handler.headers.get(name) is not None:
+            return False
+    return True
 
 
 def load_apps_config() -> dict:
@@ -1663,6 +3032,8 @@ def ping_has_change() -> tuple[bool, list[str]]:
                 except json.JSONDecodeError:
                     continue
                 if not isinstance(d, dict):
+                    continue
+                if str(d.get("session_id") or "morc") in BRIDGE_SESSIONS:
                     continue
                 if d.get("role") == "user":
                     newest = d
@@ -2092,6 +3463,240 @@ def label_folder(label_ids: list[str]) -> str:
     return "inbox"
 
 
+
+
+def _load_desktop_credentials() -> dict:
+    """Read desk Guacamole credentials from secrets (mode 600)."""
+    path = SECRETS / "desktop-credentials.txt"
+    out: dict[str, str] = {"username": "desk", "password": ""}
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            k, v = k.strip().lower(), v.strip()
+            if k in ("username", "password"):
+                out[k] = v
+    except OSError:
+        pass
+    return out
+
+
+def guacamole_desktop_launch() -> dict:
+    """Mint a Guacamole auth token and deep-link into XFCE Desktop.
+
+    Password never goes to the browser — only a short-lived authToken + client URL.
+    """
+    import base64
+    import urllib.parse
+    import urllib.request
+
+    creds = _load_desktop_credentials()
+    user = creds.get("username") or "desk"
+    password = creds.get("password") or ""
+    if not password:
+        raise RuntimeError("desktop credentials missing password")
+
+    body = urllib.parse.urlencode({"username": user, "password": password}).encode()
+    req = urllib.request.Request(
+        "http://127.0.0.1:8080/desktop/api/tokens",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    token = payload.get("authToken")
+    if not token:
+        raise RuntimeError(f"guacamole token missing: {payload!r}")
+    data_source = payload.get("dataSource") or "postgresql"
+
+    conn_id = "1"
+    try:
+        creq = urllib.request.Request(
+            f"http://127.0.0.1:8080/desktop/api/session/data/{urllib.parse.quote(data_source)}/connections?token={urllib.parse.quote(token)}",
+            method="GET",
+        )
+        with urllib.request.urlopen(creq, timeout=8) as cresp:
+            conns = json.loads(cresp.read().decode("utf-8"))
+        if isinstance(conns, dict) and conns:
+            preferred = None
+            for cid, meta in conns.items():
+                if not isinstance(meta, dict):
+                    continue
+                name = str(meta.get("name") or "")
+                ident = str(meta.get("identifier") or cid)
+                if "XFCE" in name.upper():
+                    preferred = ident
+                    break
+                if preferred is None and ("Desktop" in name or meta.get("protocol") == "rdp"):
+                    preferred = ident
+            if preferred:
+                conn_id = preferred
+            else:
+                first = next(iter(conns.values()))
+                conn_id = str((first or {}).get("identifier") or next(iter(conns.keys())))
+    except Exception:
+        pass
+
+    raw = f"{conn_id}\0{data_source}\0c".encode("utf-8")
+    client_id = base64.b64encode(raw).decode("ascii")
+    embed_url = f"/desktop/#/client/{client_id}?token={urllib.parse.quote(token)}"
+    return {
+        "embedUrl": embed_url,
+        "username": user,
+        "dataSource": data_source,
+        "connectionId": conn_id,
+        "clientId": client_id,
+    }
+
+
+# ---------- Portal short paths (/link, /mail, ...) ----------
+# Edit portal_links.json next to server.py to add or change a project path; it is
+# re-read when its mtime changes, so no restart is needed. Invalid entries are
+# skipped (and an invalid file keeps the last good map) so a typo never opens a
+# redirect to an arbitrary site.
+PORTAL_LINKS_FILE = BASE / "portal_links.json"
+PORTAL_LINK_PATH_RE = re.compile(r"^/[a-z0-9][a-z0-9-]{0,31}$")
+PORTAL_LINK_RESERVED = {"/projects", "/index.html", "/health", "/app.js", "/style.css",
+                        "/tokens.css", "/portal.css", "/portal.js", "/api"}
+PORTAL_TARGET_HOST_RE = re.compile(
+    r"^(?:[a-z0-9-]+\.)*(?:nullverse\.cloud|216\.158\.238\.236\.sslip\.io)$")
+_portal_links_cache: dict = {"mtime": None, "links": {}}
+_portal_links_lock = threading.Lock()
+
+
+def _portal_target_ok(url) -> bool:
+    if url is None:
+        return True
+    if not isinstance(url, str) or len(url) > 300 or any(c in url for c in "\\\r\n\t "):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return (parts.scheme == "https" and not parts.username and not parts.password
+            and parts.port is None and bool(PORTAL_TARGET_HOST_RE.match(parts.hostname or "")))
+
+
+def _parse_portal_links(raw: dict) -> dict:
+    out = {}
+    links = raw.get("links") if isinstance(raw, dict) else None
+    if not isinstance(links, dict):
+        raise ValueError("links must be an object")
+    for path, entry in links.items():
+        if not isinstance(path, str) or not PORTAL_LINK_PATH_RE.match(path) or path in PORTAL_LINK_RESERVED:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        cloud, sslip = entry.get("cloud"), entry.get("sslip")
+        if not (_portal_target_ok(cloud) and _portal_target_ok(sslip)):
+            continue
+        name = str(entry.get("name") or path[1:])[:60]
+        soon = entry.get("status") == "coming_soon" or not (cloud or sslip)
+        out[path] = {"name": name, "cloud": cloud or sslip, "sslip": sslip or cloud,
+                     "coming_soon": soon, "public": entry.get("public") is True and not soon}
+    return out
+
+
+def load_portal_links() -> dict:
+    with _portal_links_lock:
+        try:
+            mtime = PORTAL_LINKS_FILE.stat().st_mtime_ns
+        except OSError:
+            return _portal_links_cache["links"]
+        if mtime != _portal_links_cache["mtime"]:
+            try:
+                links = _parse_portal_links(json.loads(PORTAL_LINKS_FILE.read_text(encoding="utf-8")))
+            except (OSError, ValueError, UnicodeDecodeError):
+                links = _portal_links_cache["links"]
+            _portal_links_cache.update(mtime=mtime, links=links)
+        return _portal_links_cache["links"]
+
+
+def portal_next_path(raw: str | None) -> str | None:
+    """Only a known short path (or /projects) may be a post-sign-in destination."""
+    if raw in ("/projects",):
+        return raw
+    if isinstance(raw, str) and PORTAL_LINK_PATH_RE.match(raw) and raw in load_portal_links():
+        return raw
+    return None
+
+
+def portal_coming_soon_html(name: str) -> bytes:
+    import html as _html
+    n = _html.escape(name)
+    return f"""<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Nullverse · {n}</title>
+<link rel="stylesheet" href="/portal.css">
+</head>
+<body>
+<main>
+<header><a class="brand" href="/projects" aria-label="Nullverse home"><span class="mark">N</span> Nullverse</a></header>
+<section aria-labelledby="heading"><p class="eyebrow">YOUR PRIVATE SPACE</p><h1 id="heading">{n}</h1>
+<div class="projects"><article class="card upcoming" aria-disabled="true"><span class="icon" aria-hidden="true">{_html.escape(name[:1].upper())}</span><div class="details"><h2>{n} <span class="badge">Coming soon</span></h2><p>This project is not deployed yet.</p></div></article></div>
+<p class="intro"><a href="/projects" style="color:#c8b8f7">← Back to your projects</a></p>
+</section>
+</main>
+</body></html>
+""".encode()
+
+
+
+# Reports listed on /projects: any *.html dropped in this folder (served by Caddy at /reports/).
+PORTAL_REPORTS_DIR = Path("/srv/nullverse-reports")
+
+
+def list_portal_reports() -> list:
+    out = []
+    try:
+        entries = sorted(PORTAL_REPORTS_DIR.glob("*.html"), key=lambda f: f.stat().st_mtime, reverse=True)
+    except OSError:
+        return out
+    for f in entries:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+\.html", f.name) or not f.is_file():
+            continue
+        try:
+            head = f.read_bytes()[:65536].decode("utf-8", "replace")
+            st = f.stat()
+        except OSError:
+            continue
+        m = re.search(r"<title[^>]*>(.*?)</title>", head, re.I | re.S)
+        import html as _h
+        title = _h.unescape(m.group(1)).strip() if m else ""
+        out.append({"title": title[:200] or f.stem, "url": "/reports/" + f.name,
+                    "modified": int(st.st_mtime)})
+    return out
+
+def collect_portal_status() -> dict:
+    """Physical host RAM and the filesystem holding app data; no account quotas."""
+    memory = {}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        key, _, value = line.partition(":")
+        if key in {"MemTotal", "MemAvailable"}:
+            memory[key] = int(value.split()[0]) * 1024
+    total = memory["MemTotal"]
+    available = memory["MemAvailable"]
+    if total <= 0 or not 0 <= available <= total:
+        raise ValueError("invalid memory metrics")
+    disk = shutil.disk_usage(DATA)
+    if disk.total <= 0 or not 0 <= disk.used <= disk.total:
+        raise ValueError("invalid storage metrics")
+
+    def quantities(used, capacity):
+        return {"used_bytes": used, "total_bytes": capacity,
+                "percent": round(used / capacity * 100, 2)}
+
+    return {"ram": quantities(total - available, total),
+            "storage": quantities(disk.used, disk.total),
+            "timestamp": time.time()}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "Nullink/1.1"
 
@@ -2127,6 +3732,14 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code: int, obj: dict | list, extra_headers: list[tuple[str, str]] | None = None) -> None:
         self._send(code, json.dumps(obj).encode(), "application/json", extra_headers)
 
+    def _is_https(self) -> bool:
+        if (self.headers.get("X-Forwarded-Proto") or "").lower() == "https":
+            return True
+        return getattr(self, "req_host", "") in PUBLIC_HTTPS_HOSTS
+
+    def _cookie_name(self) -> str:
+        return COOKIE_NAME if self._is_https() else LOCAL_COOKIE_NAME
+
     def _cookie_token(self) -> str | None:
         raw = self.headers.get("Cookie")
         if not raw:
@@ -2136,9 +3749,22 @@ class Handler(BaseHTTPRequestHandler):
             c.load(raw)
         except Exception:
             return None
-        if COOKIE_NAME not in c:
+        name = self._cookie_name()
+        if name not in c:
             return None
-        return c[COOKIE_NAME].value
+        return c[name].value
+
+    def _session_cookie(self, value: str, max_age: int) -> str:
+        if self._is_https():
+            return f"{COOKIE_NAME}={value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={max_age}"
+        return f"{LOCAL_COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}"
+
+    def _clear_session_cookies(self) -> list[tuple[str, str]]:
+        secure = "; Secure" if self._is_https() else ""
+        return [
+            ("Set-Cookie", self._session_cookie("", 0)),
+            ("Set-Cookie", f"{LEGACY_COOKIE_NAME}=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax{secure}"),
+        ]
 
     def _bearer_token(self) -> str | None:
         raw = self.headers.get("Authorization")
@@ -2151,7 +3777,7 @@ class Handler(BaseHTTPRequestHandler):
         return token or None
 
     def _resolve_auth(self) -> dict | None:
-        """Precedence: Bearer, then morc_session cookie. Attaches self.auth."""
+        """Precedence: Bearer, then server-side session cookie. Attaches self.auth."""
         bearer = self._bearer_token()
         if bearer is not None:
             # Invalid/malformed Bearer must not fall through to cookie.
@@ -2173,8 +3799,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return auth
-        if verify_session(self._cookie_token()):
-            auth = {"type": "session", "session_id": "morc_session"}
+        rec = get_session(self._cookie_token(), touch=True)
+        if rec:
+            auth = {"type": "session", "session_id": rec.get("id"), "session_record": rec}
             self.auth = auth
             return auth
         self.auth = None
@@ -2255,7 +3882,29 @@ class Handler(BaseHTTPRequestHandler):
         if auth.get("type") == "session":
             return True
         allowed = auth.get("sessions") or []
-        return str(session_id) in {str(s) for s in allowed}
+        if str(session_id) in {str(s) for s in allowed}:
+            return True
+        try:
+            return ai_rooms.allowed(str(auth.get("token_id") or ""), allowed, str(session_id))
+        except Exception:
+            return False
+
+    def _resolve_room(self, sid, default: str = "morc") -> str:
+        """'@current' (or omitted, once a room was chosen) -> this Bearer connection's current room."""
+        auth = getattr(self, "auth", None) or {}
+        if auth.get("type") != "bearer":
+            return str(sid or default)
+        tid = str(auth.get("token_id") or "")
+        if sid == ai_rooms.CURRENT or (not sid and (ai_rooms.load()["connections"].get(tid) or {}).get("current")):
+            return ai_rooms.current(tid, auth.get("sessions") or []) or default
+        return str(sid or default)
+
+    def _room_titles(self) -> dict:
+        try:
+            return {str(x.get("id")): str(x.get("title") or x.get("id"))
+                    for x in flat_sessions_from_roster(load_roster()) if isinstance(x, dict)}
+        except Exception:
+            return {}
 
     def _require_session_access(self, session_id: str) -> bool:
         if self._session_allowed(session_id):
@@ -2296,14 +3945,131 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Credentials", "true")
         self.end_headers()
 
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        # Route by the actual authority only, never by forwarded host headers.
+        hosts = self.headers.get_all("Host", [])
+        authority = hosts[0].lower() if len(hosts) == 1 else ""
+        allowed = PORTAL_HOSTS | {"nullink.nullverse.cloud",
+                   "nullink.216.158.238.236.sslip.io", "localhost", "127.0.0.1"}
+        host, sep, port = authority.partition(":")
+        if host not in allowed or (sep and port not in {"80", "443", str(PORT)}):
+            self._json(421, {"error": "untrusted_host"})
+            return False
+        self.req_host = host
+        self.portal_host = host in PORTAL_HOSTS
+        if self.portal_host:
+            path = urllib.parse.urlsplit(self.path).path
+            permitted = {
+                "GET": {"/", "/index.html", "/projects", "/app.js", "/style.css",
+                        "/tokens.css", "/portal.css", "/portal.js", "/health",
+                        "/api/me", "/api/auth/method", "/api/portal/status",
+                        "/api/portal/reports"},
+                "POST": {"/api/auth/verify", "/api/auth/logout"},
+            }
+            if (path.startswith("/s/") or path.startswith("/a/") or path.startswith("/reports/") or path.startswith("/api/share/")
+                    or path == "/share-links") and self.command in ("GET", "POST"):
+                return True
+            if path not in permitted.get(self.command, set()) and not (
+                    self.command == "GET" and path in load_portal_links()):
+                self._json(404, {"error": "not_found"})
+                return False
+        return True
+
     def do_GET(self) -> None:
         path = urllib.parse.urlparse(self.path).path
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if self.portal_host and share_links.handle(self, "GET", path, qs):
+            return
+        if self._guest_gate("GET", path):
+            return
+        if path == "/api/guest/requests":
+            return self._guest_owner_list()
+        if path == "/api/guest/audit":
+            if self._require_owner() is None:
+                return
+            if (qs.get("format") or [""])[0] == "csv":
+                data = guest_audit_query({**qs, "limit": ["5000"], "offset": ["0"]})
+                return self._send(200, guest_audit_csv(data["rows"]), "text/csv; charset=utf-8",
+                                  [("Content-Disposition", 'attachment; filename="nullink-guest-audit.csv"')])
+            return self._json(200, guest_audit_query(qs))
+        if path == "/guest-audit":
+            if self._require_owner() is None:
+                return
+            return self._serve_static("guest-audit.html", "text/html; charset=utf-8")
+        if path == "/guest-audit.js":
+            return self._serve_static("guest-audit.js", "application/javascript; charset=utf-8")
+        m = re.match(r"^/api/guest/request/(GR-[A-Z0-9]{6})$", path)
+        if m:
+            return self._guest_request_status(m.group(1), (qs.get("poll") or [""])[0])
+        if path == "/guest.js":
+            return self._serve_static("guest.js", "application/javascript; charset=utf-8")
+
+        if path == "/api/portal/reports":
+            if not self.portal_host:
+                return self._json(404, {"error": "not_found"})
+            if not verify_session(self._cookie_token()):
+                return self._json(401, {"error": "unauthorized"})
+            return self._json(200, {"reports": list_portal_reports()})
+
+        if path == "/api/portal/status":
+            if not self.portal_host:
+                return self._json(404, {"error": "not_found"})
+            if not verify_session(self._cookie_token()):
+                return self._json(401, {"error": "unauthorized"})
+            try:
+                metrics = collect_portal_status()
+            except (OSError, ValueError, KeyError, IndexError):
+                return self._json(503, {"error": "status_unavailable"})
+            return self._json(200, metrics)
+
+        if path == "/api/auth/gate":
+            # Caddy forward_auth target for proxied apps (/android, /desktop) on the
+            # Nullink hosts. Human cookie session only: Bearer tokens never pass.
+            if self.portal_host:
+                return self._json(404, {"error": "not_found"})
+            if verify_session(self._cookie_token()):
+                return self._send(204, b"", extra_headers=[("Vary", "Cookie")])
+            accept = self.headers.get("Accept") or ""
+            if self.headers.get("Sec-Fetch-Mode") == "navigate" or "text/html" in accept:
+                return self._send(302, b"", extra_headers=[("Location", "/")])
+            return self._json(401, {"error": "unauthorized"})
+
+        if self.portal_host:
+            authenticated = verify_session(self._cookie_token())
+            if path in ("/", "/index.html") and authenticated:
+                nxt = portal_next_path((qs.get("next") or [None])[0]) or "/projects"
+                return self._send(302, b"", extra_headers=[("Location", nxt)])
+            links = load_portal_links()
+            if path in links:
+                link = links[path]
+                if not authenticated and not link["public"]:
+                    return self._send(302, b"", extra_headers=[
+                        ("Location", "/?next=" + urllib.parse.quote(path, safe="/"))])
+                if link["coming_soon"]:
+                    return self._send(200, portal_coming_soon_html(link["name"]),
+                                      "text/html; charset=utf-8", [
+                        ("Content-Security-Policy", "default-src 'none'; style-src 'self'; "
+                         "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"),
+                        ("X-Content-Type-Options", "nosniff"),
+                        ("Referrer-Policy", "same-origin")])
+                target = link["sslip"] if self.req_host in SSLIP_PORTAL_HOSTS else link["cloud"]
+                return self._send(302, b"", extra_headers=[("Location", target),
+                                                           ("Referrer-Policy", "no-referrer")])
+            if path == "/projects":
+                if not authenticated:
+                    return self._send(302, b"", extra_headers=[("Location", "/")])
+                return self._serve_static("portal.html", "text/html; charset=utf-8")
+            if path in ("/portal.css", "/portal.js"):
+                return self._serve_static(path[1:], "text/css" if path.endswith("css") else "application/javascript")
 
         if path in ("/", "/index.html"):
             return self._serve_static("index.html", "text/html; charset=utf-8")
         if path == "/app.js":
             return self._serve_static("app.js", "application/javascript; charset=utf-8")
+        if path == "/vendor/socket.io.min.js":
+            return self._serve_static("vendor/socket.io.min.js", "application/javascript; charset=utf-8")
         if path == "/phone-drive.js":
             return self._serve_static("phone-drive.js", "application/javascript; charset=utf-8")
         if path == "/style.css":
@@ -2354,10 +4120,48 @@ class Handler(BaseHTTPRequestHandler):
                     "scopes": auth.get("scopes") or [],
                     "sessions": auth.get("sessions") or [],
                 })
+            rec = auth.get("session_record") or {}
+            if rec.get("method") == "guest":
+                return self._json(200, {
+                    "authenticated": True,
+                    "auth_type": "guest",
+                    "guest": {"name": rec.get("guest_name"), "scope": rec.get("scope"),
+                              "label": "guest", "expires_at": rec.get("expires_at"),
+                              "now": time.time(),
+                              "waiting_for_extend": float(rec.get("expires_at", 0)) - time.time() <= GUEST_WARN_SEC,
+                              "session_id": rec.get("id")},
+                })
             return self._json(200, {
                 "authenticated": True,
                 "auth_type": "session",
+                "session": {
+                    "id": rec.get("id"),
+                    "created_at": rec.get("created_at"),
+                    "expires_at": rec.get("expires_at"),
+                    "stepup_valid": time.time() - float(rec.get("stepup_at") or 0) <= STEPUP_WINDOW_SEC,
+                },
             })
+
+        if path == "/api/auth/sessions":
+            return self._list_sessions()
+
+        if path == "/api/rt/whoami":
+            # Socket.IO handshake check (rt_server.py): same cookie/Bearer rules as REST.
+            if not self._require_api_auth(["messages:read"]):
+                return
+            auth = getattr(self, "auth", None) or {}
+            if auth.get("type") == "bearer":
+                return self._json(200, {"ok": True, "type": "bearer", "guest": False,
+                                        "sessions": [str(x) for x in (auth.get("sessions") or [])],
+                                        "name": auth.get("name")})
+            rec = auth.get("session_record") or {}
+            guest = rec.get("method") == "guest"
+            return self._json(200, {"ok": True, "type": "session", "guest": guest,
+                                    "scope": rec.get("scope") if guest else "owner",
+                                    "sessions": "*",
+                                    "owner_only": sorted(OWNER_ONLY_SESSIONS),
+                                    "hide_history": bool(guest and GUEST_HIDE_HISTORY),
+                                    "expires_at": rec.get("expires_at")})
 
         if path == "/api/sessions":
             if not self._require_api_auth(["sessions:read"]):
@@ -2387,11 +4191,27 @@ class Handler(BaseHTTPRequestHandler):
                     "default_session": default,
                     "sessions": sessions,
                 })
+            cats_out = roster.get("categories") or []
+            _rec = get_session(self._cookie_token()) or {}
+            if _rec.get("method") == "guest":
+                sessions = [x for x in sessions if str(x.get("id") or "") not in OWNER_ONLY_SESSIONS]
+                cats_out = [dict(c, bots=[b for b in (c.get("bots") or []) if isinstance(b, dict)
+                                          and str(b.get("id") or "") not in OWNER_ONLY_SESSIONS])
+                            for c in cats_out if isinstance(c, dict)]
             return self._json(200, {
-                "categories": roster.get("categories") or [],
+                "categories": cats_out,
                 "default_session": roster.get("default_session") or "morc",
                 "sessions": sessions,
             })
+
+        if path == "/api/replit/status":
+            if not self._require_owner():
+                return
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:8773/replit/api/room-status", timeout=5) as r:
+                    return self._json(200, json.loads(r.read()))
+            except Exception:
+                return self._json(503, {"error": "replit_bridge_down"})
 
         if path == "/api/auth/tokens":
             return self._list_tokens()
@@ -2415,7 +4235,7 @@ class Handler(BaseHTTPRequestHandler):
                 except (ValueError, IndexError):
                     limit = 50
             limit = max(1, min(100, limit))
-            sid = (qs.get("session") or ["morc"])[0]
+            sid = self._resolve_room((qs.get("session") or [""])[0])
             if not self._require_session_access(sid):
                 return
             msgs = read_messages(after_id=after)
@@ -2485,8 +4305,29 @@ class Handler(BaseHTTPRequestHandler):
             items = build_inbox_items()
             return self._json(200, {"items": items, "count": len(items)})
 
+
+        if path == "/api/desktop/launch":
+            if not self._require_auth():
+                return
+            try:
+                data = guacamole_desktop_launch()
+                return self._json(200, data)
+            except Exception as exc:
+                return self._json(502, {"error": "desktop_launch_failed", "detail": str(exc)[:300]})
+
+        if path == "/api/desktop/credentials":
+            # Removed 2026-10-06: the desk password never goes to the browser.
+            # Use /api/desktop/launch (server-side Guacamole sign-in) instead.
+            if not self._require_auth():
+                return
+            return self._json(410, {"error": "removed",
+                                    "message": "Use Sign in (automatic desktop sign-in)."})
+
+
         if path == "/api/apps":
-            # Allowlist metadata is non-sensitive; proxy still requires auth.
+            # Signed-in only (2026-10-07 lockdown); proxy also requires auth.
+            if not self._require_auth():
+                return
             cfg = load_apps_config()
             apps = [public_app_view(a) for a in (cfg.get("apps") or []) if isinstance(a, dict)]
             return self._json(200, {
@@ -2595,21 +4436,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"task": task})
 
         if path == "/api/vault":
-            if not self._require_auth():
+            if not self._vault_owner():
                 return
             q = (qs.get("q") or qs.get("query") or [None])[0]
             items = list_vault_snippets(q)
-            return self._json(200, {"items": items, "count": len(items)})
+            return self._json(200, {"items": items, "count": len(items), "search": "title_and_tags"})
 
         m = re.match(r"^/api/vault/([^/]+)$", path)
         if m:
-            if not self._require_auth():
+            rec = self._vault_owner()
+            if not rec:
                 return
-            vid = urllib.parse.unquote(m.group(1))
-            item = load_vault_snippet(vid)
-            if not item:
-                return self._json(404, {"error": "not_found"})
-            return self._json(200, {"item": item})
+            return self._vault_view(urllib.parse.unquote(m.group(1)), rec)
+
+        m = re.match(r"^/api/admin/vault(?:/([^/]+))?$", path)
+        if m:
+            return self._admin_vault_read(m.group(1))
 
 
         if path == "/api/playground/chatgpt":
@@ -2623,11 +4465,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/slack/interact":
+            return self._slack_interact()
+        if getattr(self, "portal_host", False) and share_links.handle(
+                self, "POST", path, urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)):
+            return
+        if self._guest_gate("POST", path):
+            return
+        if path == "/api/guest/request":
+            return self._guest_request_create()
+        if path == "/api/auth/guest/redeem":
+            return self._guest_redeem()
+        if path.startswith("/api/guest/"):
+            return self._guest_owner_action(path)
 
         if path == "/api/auth/verify":
             return self._auth_verify()
         if path == "/api/auth/logout":
             return self._auth_logout()
+        if path == "/api/auth/logout-all":
+            return self._auth_logout_all()
+        if path == "/api/auth/stepup":
+            return self._auth_stepup()
+        if path == "/api/ssh/stepup":
+            return self._ssh_stepup()
+        if path == "/api/admin/ssh-session":
+            return self._admin_ssh_session()
         if path == "/api/auth/totp/setup":
             return self._totp_setup()
         if path == "/api/auth/totp/confirm":
@@ -2702,6 +4565,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_message()
         if path == "/api/admin/set-otp":
             return self._admin_set_otp()
+        if path == "/api/admin/a2a-post":
+            return self._admin_a2a_post()
         if path == "/api/admin/reply":
             return self._admin_reply()
 
@@ -2765,6 +4630,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         path = urllib.parse.urlparse(self.path).path
+        if self._guest_gate("PATCH", path):
+            return
         m = re.match(r"^/api/labels/([^/]+)$", path)
         if m:
             return self._label_update(m.group(1))
@@ -2788,6 +4655,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         # alias save
         path = urllib.parse.urlparse(self.path).path
+        if self._guest_gate("PUT", path):
+            return
         if path == "/api/phone/screen/frame":
             device = self._phone_device_auth()
             if not device:
@@ -2847,6 +4716,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         path = urllib.parse.urlparse(self.path).path
+        if self._guest_gate("DELETE", path):
+            return
         m = re.match(r"^/api/phone/devices/([a-f0-9]{32})$", path)
         if m:
             if not self._require_auth():
@@ -3151,9 +5022,69 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not_found"})
         return self._json(200, {"ok": True, "id": tid})
 
-    # ---------- vault snippets (F7) ----------
-    def _vault_create(self) -> None:
+    # ---------- vault snippets (F7; encrypted + step-up 2026-10-19) ----------
+    def _vault_owner(self) -> dict | None:
+        """Owner cookie session only (no Bearer/AI tokens, no guests). Sends the error itself."""
         if not self._require_auth():
+            return None
+        rec = (getattr(self, "auth", None) or {}).get("session_record") or {}
+        if rec.get("method") == "guest" or rec.get("guest"):
+            self._json(403, {"error": "guest_forbidden"})
+            return None
+        return rec
+
+    def _vault_stepped_up(self, rec: dict) -> bool:
+        return time.time() - float(rec.get("ssh_stepup_at") or 0) <= SSH_STEPUP_WINDOW_SEC
+
+    def _vault_stepup_error(self) -> None:
+        self._json(403, {"error": "step_up_required", "stepup_endpoint": "/api/ssh/stepup",
+                         "message": "Enter an authenticator code to unlock Vault contents for 10 minutes."})
+
+    def _vault_view(self, vid: str, rec: dict) -> None:
+        ip, ua = client_ip(self), str(self.headers.get("User-Agent") or "")[:160]
+        if not self._vault_stepped_up(rec):
+            item = load_vault_snippet(vid, decrypt=False)
+            if not item:
+                return self._json(404, {"error": "not_found"})
+            vault_audit("view_masked", id=vid, ip=ip, ua=ua, session=rec.get("id"))
+            return self._json(200, {"item": item, "locked": True, "stepup_endpoint": "/api/ssh/stepup",
+                                    "unlock_window_sec": SSH_STEPUP_WINDOW_SEC})
+        try:
+            item = load_vault_snippet(vid, decrypt=True)
+        except VaultKeyUnavailable:
+            return self._json(503, {"error": "vault_key_unavailable"})
+        except VaultIntegrityError:
+            vault_audit("integrity_failure", id=vid, ip=ip, ua=ua, session=rec.get("id"))
+            return self._json(500, {"error": "vault_integrity", "message": "This entry failed its integrity check."})
+        if not item:
+            return self._json(404, {"error": "not_found"})
+        vault_audit("decrypt_view", id=vid, ip=ip, ua=ua, session=rec.get("id"))
+        remaining = int(SSH_STEPUP_WINDOW_SEC - (time.time() - float(rec.get("ssh_stepup_at") or 0)))
+        return self._json(200, {"item": item, "locked": False, "unlocked_for_sec": max(0, remaining)})
+
+    def _admin_vault_read(self, vid: str | None) -> None:
+        """Loopback-only (Morc's server-side access through the app). Audited, no content logged."""
+        if not is_localhost(self) or self.headers.get("Authorization") is not None:
+            return self._json(403, {"error": "localhost_only"})
+        if not vid:
+            items = list_vault_snippets()
+            return self._json(200, {"items": items, "count": len(items)})
+        vid = urllib.parse.unquote(vid)
+        try:
+            item = load_vault_snippet(vid, decrypt=True)
+        except VaultKeyUnavailable:
+            return self._json(503, {"error": "vault_key_unavailable"})
+        except VaultIntegrityError:
+            vault_audit("integrity_failure", id=vid, ip="local", ua="admin-loopback")
+            return self._json(500, {"error": "vault_integrity"})
+        if not item:
+            return self._json(404, {"error": "not_found"})
+        vault_audit("decrypt_view", id=vid, ip="local", ua=str(self.headers.get("User-Agent") or "admin-loopback")[:160],
+                    actor="morc-local")
+        return self._json(200, {"item": item})
+
+    def _vault_create(self) -> None:
+        if not self._vault_owner():
             return
         body = self._read_json()
         title = str(body.get("title") or "").strip()
@@ -3164,21 +5095,29 @@ class Handler(BaseHTTPRequestHandler):
         # allow tags as comma-separated string
         if isinstance(body.get("tags"), str):
             tags = [t.strip() for t in body["tags"].split(",") if t.strip()]
-        entry = save_vault_snippet({
-            "title": title or text_body[:60],
-            "body": text_body,
-            "tags": tags,
-        })
+        try:
+            entry = save_vault_snippet({"title": title or text_body[:60], "body": text_body, "tags": tags})
+        except VaultKeyUnavailable:
+            return self._json(503, {"error": "vault_key_unavailable"})
+        vault_audit("create", id=entry["id"], ip=client_ip(self), ua=str(self.headers.get("User-Agent") or "")[:160])
         return self._json(200, {"ok": True, "item": entry})
 
     def _vault_update(self, vid: str) -> None:
-        if not self._require_auth():
+        rec = self._vault_owner()
+        if not rec:
             return
         vid = urllib.parse.unquote(str(vid or "")).strip()
-        existing = load_vault_snippet(vid)
+        body = self._read_json()
+        if body.get("body") is not None and not self._vault_stepped_up(rec):
+            return self._vault_stepup_error()
+        try:
+            existing = load_vault_snippet(vid, decrypt=True)
+        except VaultKeyUnavailable:
+            return self._json(503, {"error": "vault_key_unavailable"})
+        except VaultIntegrityError:
+            return self._json(500, {"error": "vault_integrity"})
         if not existing:
             return self._json(404, {"error": "not_found"})
-        body = self._read_json()
         if "title" in body and body["title"] is not None:
             existing["title"] = str(body["title"]).strip()[:200] or existing["title"]
         if "body" in body and body["body"] is not None:
@@ -3188,12 +5127,23 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(tags, str):
                 tags = [t.strip() for t in tags.split(",") if t.strip()]
             existing["tags"] = tags if isinstance(tags, list) else existing.get("tags") or []
-        entry = save_vault_snippet(existing)
+        try:
+            entry = save_vault_snippet(existing)
+        except VaultKeyUnavailable:
+            return self._json(503, {"error": "vault_key_unavailable"})
+        vault_audit("update", id=vid, ip=client_ip(self), ua=str(self.headers.get("User-Agent") or "")[:160],
+                    body_changed=body.get("body") is not None, session=rec.get("id"))
+        if not self._vault_stepped_up(rec):
+            entry = {**entry, "body": VAULT_MASK, "locked": True}
         return self._json(200, {"ok": True, "item": entry})
 
     def _vault_delete(self, vid: str) -> None:
-        if not self._require_auth():
+        rec = self._vault_owner()
+        if not rec:
             return
+        if not self._vault_stepped_up(rec):
+            return self._vault_stepup_error()
+        vault_audit("delete", id=vid, ip=client_ip(self), ua=str(self.headers.get("User-Agent") or "")[:160])
         vid = urllib.parse.unquote(str(vid or "")).strip()
         if not delete_vault_snippet(vid):
             return self._json(404, {"error": "not_found"})
@@ -4037,7 +5987,7 @@ class Handler(BaseHTTPRequestHandler):
                  "style-src 'self' 'unsafe-inline'; "
                  "img-src 'self' data: blob:; "
                  "connect-src 'self'; "
-                 "frame-src 'self'; "
+                 "frame-src 'self' https://nullmail.nullverse.cloud https://nullmail.216.158.238.236.sslip.io; "
                  "frame-ancestors 'none'; "
                  "base-uri 'self'; "
                  "form-action 'self'"),
@@ -4046,85 +5996,374 @@ class Handler(BaseHTTPRequestHandler):
             ]
         self._send(200, data, ctype, extra)
 
-    def _auth_verify(self) -> None:
-        with _lock:
-            rate = load_rate()
-            now = time.time()
-            if rate.get("locked_until", 0) > now:
-                remaining = int(rate["locked_until"] - now)
-                return self._json(429, {
-                    "error": "locked",
-                    "retry_after_sec": remaining,
-                    "message": f"Too many attempts. Try again in {remaining // 60 + 1} min.",
-                })
+    def _check_code(self, code: str, now: float):
+        """Verify a login/step-up code. Returns (method|None, error|None) where
+        error is (status, body) for format/state problems that are NOT counted
+        as guesses. (None, None) means a wrong code."""
+        config = load_totp()
+        using_totp = bool(config and config.get("enabled") and config.get("secret"))
+        if using_totp:
+            if not code:
+                return None, (400, {"error": "invalid_code_format",
+                                    "message": "Enter an authenticator or recovery code."})
+            if verify_totp(code, config, now=now, consume=True):
+                return "totp", None
+            if "-" in code and consume_recovery_code(code, config):
+                return "recovery", None
+            # The rotating single-use PIN remains a separate first-class option.
+            if code.isdigit() and len(code) == 6 and check_pin(code, now, consume=True):
+                return "pin", None
+            return None, None
+        if not (code.isdigit() and len(code) == 6):
+            return None, (400, {"error": "invalid_pin_format", "message": "Enter a 6-digit PIN."})
+        otp = load_otp()
+        if not otp:
+            return None, (503, {"error": "no_otp",
+                                "message": "No PIN is active (PINs work once). Ask Morc for a new Nullink PIN."})
+        expires = otp.get("expires_at")
+        if expires and float(expires) < now:
+            return None, (401, {"error": "expired", "message": "PIN expired. Ask for a new Nullink PIN."})
+        if check_pin(code, now, consume=True):
+            return "pin", None
+        return None, None
 
-            body = self._read_json()
-            code = str(body.get("code", body.get("pin", ""))).strip()
-            config = load_totp()
-            using_totp = bool(config and config.get("enabled") and config.get("secret"))
-            if using_totp:
-                if not code:
-                    return self._json(400, {"error": "invalid_code_format", "message": "Enter an authenticator or recovery code."})
-                ok = verify_totp(code, config, now=now, consume=True)
-                if not ok and "-" in code:
-                    ok = consume_recovery_code(code, config)
-                # TOTP is offered alongside the existing rotating PIN. A valid,
-                # unexpired PIN remains a separate first-class login option.
-                if not ok and code.isdigit() and len(code) == 6:
-                    otp = load_otp()
-                    if otp and (not otp.get("expires_at") or float(otp["expires_at"]) >= now):
-                        ok = hmac.compare_digest(hash_pin(code, otp["salt"]), otp["pin_hash"])
-            else:
-                if not (code.isdigit() and len(code) == 6):
-                    return self._json(400, {"error": "invalid_pin_format", "message": "Enter a 6-digit PIN."})
-                otp = load_otp()
-                if not otp:
-                    return self._json(503, {"error": "no_otp", "message": "No PIN set yet. Ask for a new Nullink PIN."})
-                expires = otp.get("expires_at")
-                if expires and float(expires) < now:
-                    return self._json(401, {"error": "expired", "message": "PIN expired. Ask for a new Nullink PIN."})
-                ok = hmac.compare_digest(hash_pin(code, otp["salt"]), otp["pin_hash"])
-            if not ok:
-                fails = int(rate.get("fails", 0)) + 1
-                rate["fails"] = fails
-                if fails >= MAX_FAILS:
-                    rate["locked_until"] = now + LOCK_SEC
-                    rate["fails"] = 0
-                    save_rate(rate)
-                    return self._json(429, {
-                        "error": "locked",
-                        "retry_after_sec": LOCK_SEC,
-                        "message": "Too many attempts. Locked for 15 minutes.",
-                    })
+    def _rate_limited_check(self, code: str):
+        """Per-client exponential lockout + global ceiling around _check_code."""
+        now = time.time()
+        ip = client_ip(self)
+        with _auth_lock:
+            rate = load_rate()
+            _prune_rate(rate, now)
+            locked, retry, scope = rate_locked(rate, ip, now)
+            if locked:
+                return None, (429, {
+                    "error": "locked",
+                    "scope": scope,
+                    "retry_after_sec": retry,
+                    "message": f"Too many attempts. Try again in {retry // 60 + 1} min.",
+                })
+            method, err = self._check_code(code, now)
+            if err:
+                return None, err
+            if not method:
+                using_totp = totp_enabled()
+                info = rate_record_failure(rate, ip, now)
                 save_rate(rate)
-                left = MAX_FAILS - fails
-                return self._json(401, {
+                if info["locked"]:
+                    mins = info["retry_after"] // 60
+                    return None, (429, {
+                        "error": "locked",
+                        "scope": info["scope"],
+                        "retry_after_sec": info["retry_after"],
+                        "message": f"Too many attempts. Locked for {mins} minutes.",
+                    })
+                left = info["attempts_left"]
+                return None, (401, {
                     "error": "wrong_code" if using_totp else "wrong_pin",
                     "message": f"Incorrect code. {left} attempt(s) left.",
                     "attempts_left": left,
                 })
-
-            rate["fails"] = 0
-            rate["locked_until"] = 0
+            rate_record_success(rate, ip)
             save_rate(rate)
-            exp = int(now) + SESSION_TTL_SEC
-            token = sign_session(exp)
-            cookie = (
-                f"{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SEC}"
-            )
-            proto = (self.headers.get("X-Forwarded-Proto") or "").lower()
-            if proto == "https":
-                cookie += "; Secure"
-            return self._json(200, {"ok": True, "expires_in": SESSION_TTL_SEC}, [
-                ("Set-Cookie", cookie),
-            ])
+            return method, None
+
+    def _auth_verify(self) -> None:
+        body = self._read_json()
+        code = str(body.get("code", body.get("pin", ""))).strip()
+        method, err = self._rate_limited_check(code)
+        if err:
+            return self._json(err[0], err[1])
+        value, _rec = create_session(client_ip(self), self.headers.get("User-Agent") or "", method)
+        headers = []
+        if self._is_https():
+            # Expire any legacy cookie so browsers stop sending it.
+            headers.append(("Set-Cookie", f"{LEGACY_COOKIE_NAME}=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax; Secure"))
+        headers.append(("Set-Cookie", self._session_cookie(value, SESSION_TTL_SEC)))
+        return self._json(200, {"ok": True, "expires_in": SESSION_TTL_SEC, "method": method}, headers)
 
     def _auth_logout(self) -> None:
-        cookie = f"{COOKIE_NAME}=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax"
-        return self._json(200, {"ok": True}, [("Set-Cookie", cookie)])
+        revoke_session(self._cookie_token())
+        return self._json(200, {"ok": True}, self._clear_session_cookies())
+
+    def _auth_logout_all(self) -> None:
+        if not self._require_auth():
+            return
+        n = revoke_all_sessions()
+        return self._json(200, {"ok": True, "revoked": n}, self._clear_session_cookies())
+
+    def _auth_stepup(self) -> None:
+        if not self._require_auth():
+            return
+        rec = (getattr(self, "auth", None) or {}).get("session_record") or {}
+        body = self._read_json()
+        code = str(body.get("code", body.get("pin", ""))).strip()
+        method, err = self._rate_limited_check(code)
+        if err:
+            return self._json(err[0], err[1])
+        mark_stepup(rec.get("_key", ""))
+        return self._json(200, {"ok": True, "method": method, "valid_for_sec": STEPUP_WINDOW_SEC})
+
+    # ----- SSH terminal (2026-10-19) -----
+    def _ssh_stepup(self) -> None:
+        """Owner cookie session + a TOTP code (authenticator only) -> ssh_stepup_at on that session."""
+        ip, ua = client_ip(self), str(self.headers.get("User-Agent") or "")[:160]
+        if self.headers.get("Authorization") is not None:
+            ssh_audit("stepup_refused", reason="authorization_header", ip=ip, ua=ua)
+            return self._json(403, {"error": "forbidden", "message": "Owner browser session only."})
+        if self.headers.get("Origin") not in SSH_ALLOWED_ORIGINS:
+            ssh_audit("stepup_refused", reason="bad_origin", origin=self.headers.get("Origin") or "(none)", ip=ip, ua=ua)
+            return self._json(403, {"error": "bad_origin"})
+        rec = get_session(self._cookie_token())
+        if not rec:
+            return self._json(401, {"error": "unauthorized"})
+        if rec.get("method") == "guest" or rec.get("guest"):
+            ssh_audit("stepup_refused", reason="guest", ip=ip, ua=ua)
+            return self._json(403, {"error": "guest_forbidden"})
+        if not totp_enabled():
+            return self._json(409, {"error": "totp_not_enabled",
+                                    "message": "Turn on the authenticator app in Nullink settings first."})
+        code = str((self._read_json() or {}).get("code", "")).replace(" ", "").strip()
+        now = time.time()
+        with _auth_lock:
+            rate = load_rate()
+            _prune_rate(rate, now)
+            locked, retry, scope = rate_locked(rate, ip, now)
+            if locked:
+                ssh_audit("stepup_refused", reason="locked", ip=ip, ua=ua)
+                return self._json(429, {"error": "locked", "retry_after_sec": retry,
+                                        "message": f"Too many attempts. Try again in {retry // 60 + 1} min."})
+            ok = bool(code.isdigit() and len(code) == TOTP_DIGITS and verify_totp(code, load_totp() or {}, now, consume=True))
+            if not ok:
+                info = rate_record_failure(rate, ip, now)
+                save_rate(rate)
+                ssh_audit("stepup_failed", ip=ip, ua=ua, nullink_session=rec.get("id"))
+                if info["locked"]:
+                    return self._json(429, {"error": "locked", "retry_after_sec": info["retry_after"],
+                                            "message": f"Too many attempts. Locked for {info['retry_after'] // 60} minutes."})
+                return self._json(401, {"error": "wrong_code", "attempts_left": info["attempts_left"],
+                                        "message": f"Incorrect code. {info['attempts_left']} attempt(s) left."})
+            rate_record_success(rate, ip)
+            save_rate(rate)
+        mark_ssh_stepup(rec.get("_key", ""), now)
+        ssh_audit("stepup_ok", ip=ip, ua=ua, nullink_session=rec.get("id"))
+        return self._json(200, {"ok": True, "valid_for_sec": SSH_STEPUP_WINDOW_SEC})
+
+    def _admin_ssh_session(self) -> None:
+        """Loopback-only check for nullink-ssh: is this cookie value a live OWNER session?"""
+        if not is_localhost(self):
+            return self._json(403, {"error": "localhost_only"})
+        if self.headers.get("Authorization") is not None:
+            return self._json(403, {"error": "forbidden"})
+        token = str((self._read_json() or {}).get("token") or "")
+        rec = get_session(token) if token else None
+        if not rec:
+            return self._json(200, {"ok": False, "reason": "no_session"})
+        if rec.get("method") == "guest" or rec.get("guest"):
+            return self._json(200, {"ok": False, "reason": "guest"})
+        return self._json(200, {"ok": True, "session_id": rec.get("id"), "method": rec.get("method"),
+                                "ssh_stepup_at": float(rec.get("ssh_stepup_at") or 0),
+                                "expires_at": float(rec.get("expires_at") or 0), "totp_enabled": totp_enabled()})
+
+    def _require_stepup(self) -> bool:
+        """Cookie session AND a fresh code (login or /api/auth/stepup) within 5 minutes."""
+        if not self._require_auth():
+            return False
+        rec = (getattr(self, "auth", None) or {}).get("session_record") or {}
+        if time.time() - float(rec.get("stepup_at") or 0) <= STEPUP_WINDOW_SEC:
+            return True
+        self._json(403, {
+            "error": "step_up_required",
+            "message": "Confirm it's you: enter an authenticator code, recovery code, or a fresh PIN.",
+            "stepup_endpoint": "/api/auth/stepup",
+        })
+        return False
+
+    # ----- Guest access (handler side) -----
+    def _guest_gate(self, method: str, path: str) -> bool:
+        """True (and response sent) if the caller is a guest session that may not do this."""
+        if self.headers.get("Authorization") is not None:
+            return False
+        rec = get_session(self._cookie_token())
+        if not rec or rec.get("method") != "guest":
+            return False
+        scope = rec.get("scope") or "read"
+        if GUEST_HIDE_HISTORY and any(path == p or path.startswith(p + "/") for p in GUEST_HISTORY_PREFIXES):
+            guest_audit("guest_history_hidden", session_id=rec.get("id"), method=method, path=path[:120])
+            self._json(403, {"error": "guest_history_hidden",
+                             "message": "Chat history and files are hidden for guests."})
+            return True
+        if guest_path_blocked(method, path, scope):
+            guest_audit("guest_blocked", session_id=rec.get("id"), method=method, path=path[:120], scope=scope)
+            self._json(403, {"error": "guest_forbidden",
+                             "message": "Guest sessions cannot do this." if scope == "full"
+                             else "Read-only guest session: changes are not allowed."})
+            return True
+        return False
+
+    def _require_owner(self) -> dict | None:
+        auth = self._resolve_auth()
+        if not auth or auth.get("type") != "session":
+            if auth and auth.get("type") == "bearer":
+                self._json(403, {"error": "forbidden", "message": "owner cookie session required"})
+            else:
+                self._json(401, {"error": "unauthorized"})
+            return None
+        rec = auth.get("session_record") or {}
+        if rec.get("method") == "guest":
+            self._json(403, {"error": "guest_forbidden"})
+            return None
+        return rec
+
+    def _guest_request_create(self) -> None:
+        body = self._read_json()
+        st, out = guest_create_request(body.get("name"), body.get("reason"), client_ip(self),
+                                       self.headers.get("User-Agent") or "")
+        return self._json(st, out)
+
+    def _guest_request_status(self, rid: str, poll: str) -> None:
+        data = load_guest()
+        r = (data.get("requests") or {}).get(rid)
+        if not r or not poll or not r.get("poll_hash") or not hmac.compare_digest(
+                r["poll_hash"], hashlib.sha256(poll.encode()).hexdigest()):
+            return self._json(404, {"error": "not_found"})
+        status = r.get("status")
+        if status == "pending" and time.time() - float(r.get("created_at", 0)) > GUEST_PENDING_TTL_SEC:
+            status = "expired"
+        return self._json(200, {"request_id": rid, "status": status})
+
+    def _guest_redeem(self) -> None:
+        body = self._read_json()
+        pin = str(body.get("pin", body.get("code", "")))[:40]
+        now = time.time()
+        ip = client_ip(self)
+        with _auth_lock:
+            rate = load_rate()
+            _prune_rate(rate, now)
+            locked, retry, scope = rate_locked(rate, ip, now)
+            if locked:
+                return self._json(429, {"error": "locked", "scope": scope, "retry_after_sec": retry,
+                                        "message": f"Too many attempts. Try again in {retry // 60 + 1} min."})
+            req = guest_redeem_pin(pin, now)
+            if not req:
+                info = rate_record_failure(rate, ip, now)
+                save_rate(rate)
+                guest_audit("redeem_failed", ip=ip)
+                return self._json(429 if info["locked"] else 401, {
+                    "error": "locked" if info["locked"] else "invalid_guest_pin",
+                    "message": "Invalid, used or expired guest PIN."})
+            rate_record_success(rate, ip)
+            save_rate(rate)
+        value, rec = create_guest_session(req, ip, self.headers.get("User-Agent") or "", now)
+        guest_audit("redeemed", request_id=req.get("id"), session_id=rec["id"], ip=ip, scope=rec["scope"],
+                    name=req.get("name"))
+        _guest_set_fields(req.get("id"), redeemed_ip=ip)
+        threading.Thread(target=lambda: (slack_pin_finalize(req.get("id")), slack_session_status_tick()),
+                         daemon=True).start()
+        ttl = int(rec["expires_at"] - now)
+        return self._json(200, {"ok": True, "guest": True, "scope": rec["scope"], "expires_in": ttl},
+                          [("Set-Cookie", self._session_cookie(value, ttl))])
+
+    def _guest_owner_list(self) -> None:
+        if self._require_owner() is None:
+            return
+        now = time.time()
+        with _auth_lock:
+            data = _guest_prune(load_guest(), now)
+            save_guest(data)
+        reqs = sorted(data["requests"].values(), key=lambda r: r.get("created_at", 0), reverse=True)
+        return self._json(200, {
+            "pending": [_guest_public(r) for r in reqs if r.get("status") == "pending"],
+            "recent": [_guest_public(r) for r in reqs if r.get("status") != "pending"][:20],
+            "sessions": list_guest_sessions(now),
+            "options": {"pin_ttl_sec": GUEST_PIN_TTL_SEC, "block_min": GUEST_BLOCK_MIN,
+                        "scopes": list(GUEST_SCOPES)},
+        })
+
+    def _slack_interact(self) -> None:
+        """Slack interactivity Request URL (Morc app). Signed requests from John only; no cookie auth."""
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > 64 * 1024:
+            return self._json(400, {"error": "bad_request"})
+        raw = self.rfile.read(length)
+        if not slack_verify(_slack_cred("signing_secret"), self.headers.get("X-Slack-Request-Timestamp"),
+                            self.headers.get("X-Slack-Signature"), raw):
+            guest_audit("slack_bad_signature", ip=client_ip(self))
+            return self._json(401, {"error": "bad_signature"})
+        try:
+            form = urllib.parse.parse_qs(raw.decode("utf-8"))
+            payload = json.loads((form.get("payload") or ["{}"])[0])
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return self._json(400, {"error": "bad_payload"})
+        _acts = payload.get("actions") or [{}]
+        _mcpgw = str((_acts[0] or {}).get("action_id") or "").startswith("mcpgw_")
+        if ((payload.get("user") or {}).get("id")) != SLACK_OWNER_UID and not _mcpgw:
+            slack_handle_interaction(payload)  # audits the rejection
+            return self._send(200, b"", "text/plain")
+        self._send(200, b"", "text/plain")  # ack within Slack's 3 s, then work
+        threading.Thread(target=slack_handle_interaction, args=(payload,), daemon=True).start()
+
+    def _guest_owner_action(self, path: str) -> None:
+        rec = self._require_owner()
+        if rec is None:
+            return
+        by = "owner:" + str(rec.get("id"))
+        body = self._read_json()
+        m = re.match(r"^/api/guest/requests/(GR-[A-Z0-9]{6})/(approve|deny)$", path)
+        if m:
+            if m.group(2) == "deny":
+                st, out = guest_deny(m.group(1), by)
+                return self._json(st, out)
+            opts, err = _guest_opts(body)
+            if err:
+                return self._json(400, {"error": err})
+            st, out = guest_approve(m.group(1), opts, by)
+            return self._json(st, out)
+        if path == "/api/guest/mint":
+            opts, err = _guest_opts(body)
+            if err:
+                return self._json(400, {"error": err})
+            st, out = guest_mint(body.get("name") or "Guest", body.get("reason") or "", opts, by, client_ip(self))
+            return self._json(st, out)
+        if path == "/api/guest/sessions/end-all":
+            n = end_guest_sessions()
+            guest_audit("sessions_ended_all", by=by, count=n)
+            return self._json(200, {"ok": True, "ended": n})
+        m = re.match(r"^/api/guest/sessions/([0-9a-f]{12})/extend$", path)
+        if m:
+            v = extend_guest_session(m.group(1), by)
+            if not v:
+                return self._json(404, {"error": "not_found"})
+            threading.Thread(target=slack_session_status_tick, kwargs={"force": {m.group(1)}}, daemon=True).start()
+            return self._json(200, {"ok": True, "expires_at": v["expires_at"], "extensions": v["extensions"]})
+        m = re.match(r"^/api/guest/sessions/([0-9a-f]{12})/end$", path)
+        if m:
+            n = end_guest_sessions(m.group(1))
+            guest_audit("session_ended", by=by, session_id=m.group(1), count=n)
+            return self._json(200 if n else 404, {"ok": bool(n), "ended": n})
+        return self._json(404, {"error": "not found"})
+
+    def _list_sessions(self) -> None:
+        if not self._require_auth():
+            return
+        current = ((getattr(self, "auth", None) or {}).get("session_record") or {}).get("id")
+        now = time.time()
+        out = []
+        for rec in _prune_sessions(load_sessions(), now).values():
+            out.append({
+                "id": rec.get("id"),
+                "current": rec.get("id") == current,
+                "created_at": rec.get("created_at"),
+                "last_seen_at": rec.get("last_seen_at"),
+                "expires_at": rec.get("expires_at"),
+                "ip": rec.get("ip"),
+                "ua": rec.get("ua"),
+                "method": rec.get("method"),
+            })
+        out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+        return self._json(200, {"sessions": out, "count": len(out)})
 
     def _totp_setup(self) -> None:
-        if not self._require_auth():
+        if not self._require_stepup():
             return
         if totp_enabled():
             return self._json(409, {"error": "totp_already_enabled"})
@@ -4151,7 +6390,7 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _totp_confirm(self) -> None:
-        if not self._require_auth():
+        if not self._require_stepup():
             return
         body = self._read_json()
         code = str(body.get("code") or "").strip()
@@ -4166,11 +6405,10 @@ class Handler(BaseHTTPRequestHandler):
         config["last_counter"] = -1
         config["recovery_hashes"] = [_recovery_hash(code) for code in recovery_codes]
         save_totp(config)
-        save_rate({"fails": 0, "locked_until": 0})
         return self._json(200, {"ok": True, "recovery_codes": recovery_codes})
 
     def _totp_disable(self) -> None:
-        if not self._require_auth():
+        if not self._require_stepup():
             return
         body = self._read_json()
         code = str(body.get("code") or "").strip()
@@ -4183,7 +6421,6 @@ class Handler(BaseHTTPRequestHandler):
             TOTP_FILE.unlink()
         except FileNotFoundError:
             pass
-        save_rate({"fails": 0, "locked_until": 0})
         return self._json(200, {"ok": True, "method": "pin"})
 
     def _post_message(self) -> None:
@@ -4195,16 +6432,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "empty", "message": "Message cannot be empty."})
         if len(text) > 8000:
             return self._json(400, {"error": "too_long", "message": "Message too long."})
-        sid = str(body.get("session_id") or "morc")
+        auth = getattr(self, "auth", None) or {}
+        if auth.get("type") == "bearer":
+            cmd = ai_rooms.parse(text)
+            if cmd:
+                code, out = ai_rooms.handle(cmd[0], cmd[1], auth, self._room_titles())
+                return self._json(code, out)
+        sid = self._resolve_room(body.get("session_id"))
         if not self._require_session_access(sid):
             return
+        if sid in OWNER_ONLY_SESSIONS and (get_session(self._cookie_token()) or {}).get("method") == "guest":
+            return self._json(403, {"error": "guest_forbidden"})
         msg = append_message("user", text, session_id=sid)
-        write_pending("notify", {"preview": text[:200]})
-        fire_webhook("message", text[:200])
+        if sid not in BRIDGE_SESSIONS:
+            write_pending("notify", {"preview": text[:200]})
+            fire_webhook("message", text[:200])
         return self._json(200, {"ok": True, "message": msg})
 
     def _create_token(self) -> None:
-        if not self._require_auth():
+        if not self._require_stepup():
             return
         body = self._read_json()
         name = str(body.get("name") or "").strip() or "agent"
@@ -4247,7 +6493,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, {"tokens": tokens, "count": len(tokens)})
 
     def _revoke_token(self, token_id: str) -> None:
-        if not self._require_auth():
+        if not self._require_stepup():
             return
         tid = urllib.parse.unquote(str(token_id or "")).strip()
         if not tid:
@@ -4264,22 +6510,26 @@ class Handler(BaseHTTPRequestHandler):
         pin = str(body.get("pin", "")).strip()
         if not (pin.isdigit() and len(pin) == 6):
             return self._json(400, {"error": "invalid_pin"})
-        ttl = int(body.get("ttl_sec") or 24 * 3600)
-        salt = secrets.token_hex(16)
-        now = time.time()
-        data = {
-            "pin_hash": hash_pin(pin, salt),
-            "salt": salt,
-            "expires_at": now + ttl,
-            "created_at": now,
-        }
-        OTP_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        OTP_FILE.chmod(0o600)
-        current = SECRETS / "CURRENT_PIN.txt"
-        current.write_text(pin + "\n", encoding="utf-8")
-        current.chmod(0o600)
-        save_rate({"fails": 0, "locked_until": 0})
-        return self._json(200, {"ok": True, "expires_at": data["expires_at"]})
+        try:
+            ttl = int(body.get("ttl_sec") or PIN_TTL_SEC)
+        except (TypeError, ValueError):
+            return self._json(400, {"error": "invalid_ttl"})
+        info = write_otp(pin, ttl)
+        return self._json(200, {"ok": True, "expires_at": info["expires_at"], "single_use": True})
+
+    def _admin_a2a_post(self) -> None:
+        """Localhost-only: the A2A service posts an authenticated agent's message into the council room."""
+        if not is_localhost(self):
+            return self._json(403, {"error": "localhost_only"})
+        body = self._read_json()
+        text = str(body.get("text", "")).strip()
+        agent = re.sub(r"[^A-Za-z0-9_.-]", "", str(body.get("agent") or ""))[:64]
+        if not text or not agent:
+            return self._json(400, {"error": "text_and_agent_required"})
+        if len(text) > 8000:
+            return self._json(400, {"error": "too_long"})
+        msg = append_message("agent", f"[{agent}] {text}", session_id="council")
+        return self._json(200, {"ok": True, "message": msg})
 
     def _admin_reply(self) -> None:
         if not is_localhost(self):
@@ -4315,8 +6565,11 @@ def main() -> None:
         )
     httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Nullink PM listening on 127.0.0.1:{PORT}", flush=True)
+    guest_watch_start()
     httpd.serve_forever()
 
+
+share_links.bind(_sys.modules[__name__])
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="go">#1F9D55</color>
+    <color name="stop">#C0392B</color>
+    <color name="panel">#CC1A2332</color>
+</resources>

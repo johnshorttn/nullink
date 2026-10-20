@@ -1,0 +1,32 @@
+<!doctype html><html><head><title>DeepSeek (MOCK)</title></head><body>
+<div id="list"></div>
+<div class="composer"><textarea id="chat-input" placeholder="Message DeepSeek"></textarea>
+<div role="button" class="ds-icon-button" id="send"><svg width="10" height="10"></svg></div></div>
+<script>
+const list = document.getElementById('list');
+const ta = document.getElementById('chat-input');
+let n = 0;
+function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function submit(){
+  const q = ta.value.trim(); if(!q) return; ta.value=''; n++;
+  if (n===1 && !location.pathname.startsWith('/a/chat/s/')) history.pushState({}, '', '/a/chat/s/12345678-1234-1234-1234-1234567890ab');
+  const u = document.createElement('div'); u.className='ds-message _user'; u.innerText=q; list.appendChild(u);
+  const a = document.createElement('div'); a.className='ds-message';
+  const md = document.createElement('div'); md.className='ds-markdown';
+  a.appendChild(md);
+  setTimeout(()=>list.appendChild(a), 700);
+  const raw = "Echo: **" + q + "**\n\n- item one\n- item `two`\n\n```python\nprint(\"hi\")\n```";
+  const html = "<p>Echo: <strong>"+esc(q)+"</strong></p><ul><li>item one</li><li>item <code>two</code></li></ul>"+
+    "<div class='md-code-block'><div class='md-code-block-banner'><span>python</span><div role='button'>Copy</div></div><pre><code>print(\"hi\")\n</code></pre></div>";
+  if (!/noreact/.test(q)) md['__reactProps$mock'] = {markdown: raw};
+  const parts = [html.slice(0, 40), html.slice(0, 120), html];
+  let i = 0;
+  const t = setInterval(()=>{ md.innerHTML = parts[Math.min(i, parts.length-1)]; i++;
+    if(i>parts.length+1){ clearInterval(t);
+      const row=document.createElement('div'); row.className='ds-flex actions';
+      for(let k=0;k<3;k++){const b=document.createElement('div'); b.className='ds-icon-button'; b.setAttribute('role','button'); b.innerHTML='<svg width="10" height="10"></svg>'; b.style.display='inline-block'; b.style.width='10px'; b.style.height='10px'; row.appendChild(b);}
+      a.after(row);
+    }}, 900);
+}
+ta.addEventListener('keydown', e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); submit(); }});
+</script></body></html>

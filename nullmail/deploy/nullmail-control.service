@@ -1,0 +1,22 @@
+[Unit]
+Description=Nullmail fixed Postfix alias controller
+After=postfix.service
+[Service]
+User=root
+Group=nullmail
+RuntimeDirectory=nullmail-control
+RuntimeDirectoryMode=0750
+WorkingDirectory=/usr/local/lib/nullmail
+ExecStart=/usr/bin/python3 /usr/local/lib/nullmail/control.py
+Restart=on-failure
+UMask=0027
+PrivateTmp=yes
+ProtectSystem=full
+ReadWritePaths=/etc/postfix
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+[Install]
+WantedBy=multi-user.target

@@ -250,7 +250,7 @@ TOOLS = [
             "properties": {
                 "session": {
                     "type": "string",
-                    "description": "Nullink session ID.",
+                    "description": "Nullink session ID. Omit or use @current for the room picked with /room or /channel.",
                 },
                 "after": {
                     "type": "integer",
@@ -265,7 +265,6 @@ TOOLS = [
                     "default": 50,
                 },
             },
-            "required": ["session"],
             "additionalProperties": False,
         },
     },
@@ -277,14 +276,14 @@ TOOLS = [
             "properties": {
                 "session": {
                     "type": "string",
-                    "description": "Destination Nullink session ID.",
+                    "description": "Destination session ID. Omit or use @current for your current room. Text /room <name>, /rooms, /where (admins: /channel <name>, /channels) switches or lists rooms instead of posting.",
                 },
                 "text": {
                     "type": "string",
                     "description": "Message text.",
                 },
             },
-            "required": ["session", "text"],
+            "required": ["text"],
             "additionalProperties": False,
         },
     },
@@ -337,7 +336,7 @@ def tool_call(name: str, arguments: dict) -> object:
 
     if name == "nullink_pull_messages":
         return pull_messages(
-            session=str(arguments["session"]),
+            session=str(arguments.get("session") or "@current"),
             after=int(arguments.get("after", 0)),
             limit=int(arguments.get("limit", 50)),
         )
@@ -349,7 +348,7 @@ def tool_call(name: str, arguments: dict) -> object:
             raise ValueError("text must not be empty")
 
         return send_message(
-            session=str(arguments["session"]),
+            session=str(arguments.get("session") or "@current"),
             text=text,
         )
 
