@@ -1,14 +1,23 @@
 """Nullmail HTTP service, loopback only. Auth delegated to Nullink's human API."""
-import hashlib, hmac, http.client, ipaddress, json, os, secrets, socket, threading
+import reader
+import hashlib, hmac, http.client, ipaddress, json, os, secrets, socket, threading, time
+import api_v1
+from gmail import Gmail, CombinedMail
+from cases import Conflict
+from workspace import require_read
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 from core import MailStore, Drafts, build_message
-from transport import DirectPostfix
+from transport import DirectPostfix, outbound_enabled
 
 STATIC=Path(__file__).parent/'static'
 ORIGIN='https://nullmail.nullverse.cloud'
+# Dual address (2026-10-07): same instance on both hosts. Each host only accepts writes
+# from its own exact HTTPS origin; sessions stay host-only per host.
+PUBLIC_HOSTS=('nullmail.nullverse.cloud','nullmail.216.158.238.236.sslip.io')
+ORIGINS=frozenset('https://'+h for h in PUBLIC_HOSTS)
 COOKIE_NAME='__Host-nullink_session'
 AUTH_PORT=8766
 CSRF_KEY=secrets.token_bytes(32)
@@ -43,11 +52,12 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.settimeout(20)
     def log_message(self,*args): pass # Never log message IDs, recipients, cookies or bodies.
     def reply(self,status,data,kind='application/json; charset=utf-8',extra=None):
+        if isinstance(data,dict) and status>=400 and 'error' in data: data=dict(data,code={400:'invalid_request',401:'unauthenticated',403:'forbidden',404:'not_found',409:'conflict',503:'unavailable'}.get(status,'request_error'))
         if not isinstance(data,bytes): data=json.dumps(data).encode()
         self.send_response(status)
         for k,v in {'Content-Type':kind,'Content-Length':str(len(data)),'Cache-Control':'no-store',
                     'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer',
-                    'Content-Security-Policy':"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",**(extra or {})}.items(): self.send_header(k,v)
+                    'Content-Security-Policy':"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors https://nullink.nullverse.cloud https://nullink.216.158.238.236.sslip.io",**(extra or {})}.items(): self.send_header(k,v)
         self.end_headers();self.wfile.write(data)
     def cookie(self):
         c=SimpleCookie()
@@ -62,10 +72,14 @@ class Handler(BaseHTTPRequestHandler):
         status,raw,_=nullink('/api/me',self.cookie())
         if status!=200: return False
         data=json.loads(raw)
+        self.auth_data=data
         return data.get('authenticated') is True and data.get('auth_type')=='session'
     def valid_host(self):
         hosts=self.headers.get_all('Host',[])
-        return len(hosts)==1 and hosts[0] in ('nullmail.nullverse.cloud','127.0.0.1:8789')
+        return len(hosts)==1 and hosts[0] in PUBLIC_HOSTS+('127.0.0.1:8789',)
+    def expected_origin(self):
+        host=self.headers.get('Host','')
+        return 'https://'+host if host in PUBLIC_HOSTS else ORIGIN
     def body(self):
         if self.headers.get('Transfer-Encoding'): raise ValueError('Transfer encoding not supported')
         length=int(self.headers.get('Content-Length','0'))
@@ -76,15 +90,20 @@ class Handler(BaseHTTPRequestHandler):
         return result
     def do_GET(self): self.dispatch(False)
     def do_POST(self): self.dispatch(True)
+    def do_PUT(self): self.dispatch(True)
     def dispatch(self,write):
         try:
             if not self.valid_host(): return self.reply(421,{'error':'Untrusted host'})
             path=urlsplit(self.path).path
-            if write and (self.headers.get('Origin')!=ORIGIN or self.headers.get('Sec-Fetch-Site') not in (None,'same-origin')):
+            self.versioned=path.startswith('/api/v1/')
+            if self.versioned: path='/api/'+path[len('/api/v1/'):]
+            self.api_path=path
+            origin=self.headers.get('Origin')
+            if write and (origin not in ORIGINS or origin!=self.expected_origin() or self.headers.get('Sec-Fetch-Site') not in (None,'same-origin')):
                 return self.reply(403,{'error':'Origin rejected'})
-            if not write and path in ('/','/app.js','/style.css'):
-                f={'/':'index.html','/app.js':'app.js','/style.css':'style.css'}[path]
-                return self.reply(200,(STATIC/f).read_bytes(),{'/':'text/html; charset=utf-8','/app.js':'text/javascript; charset=utf-8','/style.css':'text/css; charset=utf-8'}[path])
+            if not write and path in ('/','/app.js','/workspace.js','/cases.js','/composer.js','/vendor/quill.js','/vendor/quill.snow.css','/style.css'):
+                f={'/':'index.html','/app.js':'app.js','/workspace.js':'workspace.js','/cases.js':'cases.js','/composer.js':'composer.js','/vendor/quill.js':'vendor/quill.js','/vendor/quill.snow.css':'vendor/quill.snow.css','/style.css':'style.css'}[path]
+                return self.reply(200,(STATIC/f).read_bytes(),{'/':'text/html; charset=utf-8','/composer.js':'text/javascript; charset=utf-8','/vendor/quill.js':'text/javascript; charset=utf-8','/vendor/quill.snow.css':'text/css; charset=utf-8','/app.js':'text/javascript; charset=utf-8','/workspace.js':'text/javascript; charset=utf-8','/cases.js':'text/javascript; charset=utf-8','/style.css':'text/css; charset=utf-8'}[path])
             if not write and path=='/health': return self.reply(200,{'ok':True,'service':'nullmail'})
             if path=='/api/auth/method' and not write:
                 status,body,_=nullink('/api/auth/method');return self.reply(status,body)
@@ -103,52 +122,149 @@ class Handler(BaseHTTPRequestHandler):
                 data=self.body()
                 with MUTATION: return self.write_api(path,data)
             return self.read_api(path,parse_qs(urlsplit(self.path).query))
+        except Conflict as e: self.reply(409,{'error':str(e)})
+        except PermissionError as e: self.reply(403,{'error':str(e)[:180]})
         except FileNotFoundError: self.reply(404,{'error':'Not found'})
         except (ValueError,TypeError,KeyError) as e: self.reply(400,{'error':str(e)[:180]})
         except Exception: self.reply(503,{'error':'Service unavailable. Try again shortly.'})
     def read_api(self,path,q):
         folder=q.get('folder',['inbox'])[0]
+        extended={'capabilities','accounts','labels','rules','rules/history','rules/versions','thread','sent'}
+        endpoint=path.removeprefix('/api/')
+        if endpoint=='prefs':
+            import prefs
+            store,_,actor,_=api_v1.context(self)
+            with store.db() as db: return self.reply(200,{'prefs':prefs.get(db,actor),'server_time':time.time()*1000})
+        if endpoint=='gmail/callback':
+            store,ids,actor,perm=api_v1.context(self);api_v1.admin(perm)
+            with MUTATION:self.server.gmail.complete(actor,self.cookie(),q.get('state',[''])[0],q.get('code',[''])[0],self.identities())
+            return self.reply(303,b'',extra={'Location':'/?gmail=connected#setup/external'})
+        if endpoint=='message/frame':
+            # HTML email is served as its own sandboxed document (not srcdoc) so it gets an iframe-only CSP that
+            # permits the email's inline styles while scripts, forms, plugins and (unless allowed) remote loads stay blocked.
+            out=api_v1.read(self,'message/html',q)
+            if not out.get('html'): return self.reply(404,{'error':'No HTML body'})
+            return self.reply(200,out['html'].encode(),'text/html; charset=utf-8',{'Content-Security-Policy':reader.csp(out['remote'])+"; sandbox allow-popups allow-popups-to-escape-sandbox; frame-ancestors 'self'",'X-Frame-Options':'SAMEORIGIN','Cross-Origin-Resource-Policy':'same-origin'})
+        if endpoint in extended or endpoint in ('messages','message','cases','gmail/status','gmail/labels','gmail/details','message/html','message/source') or endpoint.startswith('cases/'):
+            return self.reply(200,api_v1.read(self,endpoint,q))
         if path=='/api/session': return self.reply(200,{'authenticated':True,'csrf':self.csrf()})
         if path=='/api/config' or path=='/api/projects':
-            return self.reply(200,control({'op':'status'}))
-        if path=='/api/messages':
-            rows=self.server.mail.listing(folder,q.get('q',[''])[0][:200],q.get('recipient',[''])[0][:254],q.get('unread',[''])[0]=='1')
-            offset=max(0,int(q.get('offset',['0'])[0]));return self.reply(200,{'total':len(rows),'messages':rows[offset:offset+100]})
-        if path=='/api/message': return self.reply(200,self.server.mail.message(folder,q.get('id',[''])[0]))
+            _,_,_,perm=api_v1.context(self);api_v1.admin(perm)
+            result=control({'op':'status'})
+            enabled=getattr(self.server,'outbound_enabled',False)
+            result['outbound'].update(paused=not enabled, reason=('Send submits to the authenticated local queue. Accepted means queued; delivery is unverified. No automatic app retries.' if enabled else 'Sending is paused. Nothing is transmitted.'))
+            return self.reply(200,result)
+        if path=='/api/message/eml':
+            m=api_v1.message(self,folder,q.get('id',[''])[0])
+            body,_=self.server.mail.eml(folder,m['id'])
+            return self.reply(200,body,'message/rfc822',{'Content-Disposition':'attachment; filename="message-'+m['id'][:12]+'.eml"'})
         if path=='/api/attachment':
+            api_v1.message(self,folder,q.get('id',[''])[0])
             name,body=self.server.mail.attachment(folder,q.get('id',[''])[0],int(q.get('part',['-1'])[0]))
             return self.reply(200,body,'application/octet-stream',{'Content-Disposition':f'attachment; filename="{name}"'})
-        if path=='/api/drafts': return self.reply(200,{'drafts':self.server.drafts.list()})
+        if path=='/api/drafts':
+            store,_,actor,_=api_v1.context(self);drafts=[]
+            for d in self.server.drafts.list():
+                try: store.own_draft(d['id'],actor)
+                except PermissionError: continue
+                drafts.append(d)
+            return self.reply(200,{'drafts':drafts})
         return self.reply(404,{'error':'Not found'})
     def identities(self):
         return [a for p in control({'op':'status'})['projects'] for a in p['aliases']]
     def write_api(self,path,data):
         if path=='/api/auth/logout':
             status,body,cookie=nullink(path,self.cookie(),b'{}');return self.reply(status,body,extra={'Set-Cookie':cookie} if cookie else None)
+        store,ids,actor,perm=api_v1.context(self)
+        endpoint=path.removeprefix('/api/')
+        if endpoint.startswith(('rules/','labels/','cases/','gmail/')) or endpoint in ('accounts/selection','message/labels','messages/bulk-label','message/remote-images','message/review'):
+            return self.reply(200,api_v1.write(self,endpoint,data))
+        if path=='/api/prefs':
+            if self.command!='PUT': raise ValueError('Use PUT for preferences')
+            import prefs
+            with store.db() as db: return self.reply(200,{'prefs':prefs.put(db,actor,data),'server_time':time.time()*1000})
         if path=='/api/message/read':
+            api_v1.message(self,data['folder'],data['id'])
             if not isinstance(data.get('read'),bool): raise ValueError('read must be boolean')
             self.server.mail.flag(data['folder'],data['id'],data['read']);return self.reply(200,{'ok':True})
         if path=='/api/message/move':
+            api_v1.message(self,data['folder'],data['id'])
             self.server.mail.move(data['folder'],data['id'],data['target']);return self.reply(200,{'ok':True})
         if path=='/api/projects':
+            api_v1.admin(perm)
             if set(data)!={'label'}: raise ValueError('Only a project label is accepted')
             return self.reply(200,control({'op':'register','label':data['label']}))
-        if path=='/api/drafts': return self.reply(200,self.server.drafts.save(data,self.identities()))
+        if path=='/api/drafts':
+            if data.get('id'): store.own_draft(data['id'],actor)
+            draft=self.server.drafts.save(data,perm['send']);store.register_draft(draft['id'],actor)
+            return self.reply(200,draft)
         if path=='/api/send':
             draft=self.server.drafts.get(data.get('id'))
             if not draft: raise FileNotFoundError()
-            if draft['status'] not in ('draft','paused'): raise ValueError('Already submitted; duplicate send blocked')
-            recipients,raw=build_message(draft,self.identities())
-            # Fixed paused transport. Activation is deliberately outside this web API.
-            result=DirectPostfix(enabled=False).submit(draft['from'],recipients,raw)
+            store.own_draft(draft['id'],actor)
+            if draft['from'] not in perm['send']: raise PermissionError('From identity is not authorized')
+            external=next((a for a in self.server.gmail.accounts(actor) if a['address']==draft['from']),None) if hasattr(self.server,'gmail') else None
+            if external and draft['from'] in self.identities():raise PermissionError('Ambiguous sending transport; administrator review required')
+            if external:self.server.gmail.ready()
+            recipients,raw=build_message(draft,perm['send'])
+            request_key=data.get('request_id')
+            if self.versioned and not request_key: raise ValueError('request_id is required for sending')
+            if request_key:
+                replay=store.send_claim(request_key,draft,actor,str(getattr(self,'auth_data',{}).get('session',{}).get('id') or hashlib.sha256(self.cookie().encode()).hexdigest()))
+                if replay is not None: return self.reply(200,replay)
+            if draft['status'] not in ('draft','paused','rejected'): raise ValueError('Already submitted; duplicate send blocked')
+            if not request_key:
+                request_key=secrets.token_hex(16)
+                store.send_claim(request_key,draft,actor,str(getattr(self,'auth_data',{}).get('session',{}).get('id','legacy-session')))
+            enabled=bool(external) or getattr(self.server,'outbound_enabled',False)
+            if enabled: self.server.drafts.claim(draft['id'])
+            if external:
+                try:result=self.server.gmail.submit(actor,external['id'],draft['from'],raw)
+                except Exception:result={'status':'unknown','queue_id':None}
+            else:result=DirectPostfix(enabled=enabled).submit(draft['from'],recipients,raw)
             self.server.drafts.status(draft['id'],result['status'],result['queue_id'])
-            return self.reply(200,{'id':draft['id'],**result,'message':'Saved in paused Outbox. Nothing was sent. Open and click Send again after an administrator enables delivery.'})
+            messages={'paused':'Saved in paused Outbox. Nothing was sent.',
+                      'accepted':'Accepted by Postfix and queued. Delivery is not confirmed.',
+                      'rejected':'Submission failed before acceptance. No automatic retry; review before trying again.',
+                      'unknown':'Submission outcome is uncertain. Do not resend: delivery may have occurred. Administrator review required.'}
+            if external:messages['accepted']='Accepted by Gmail. Delivery is not confirmed.'
+            response={'id':draft['id'],**result,'provider':'gmail' if external else 'local','message':messages[result['status']]}
+            store.send_result(request_key,response)
+            return self.reply(200,response)
         return self.reply(404,{'error':'Not found'})
 
 def serve(mailroot='/var/lib/nullmail/john/Maildir',state='/var/lib/nullmail/app',port=8789):
     os.umask(0o077);Path(state).mkdir(parents=True,exist_ok=True,mode=0o700)
     server=ThreadingHTTPServer(('127.0.0.1',port),Handler)
+    server.outbound_enabled=outbound_enabled()
     server.mail=MailStore(mailroot);server.drafts=Drafts(Path(state)/'drafts.sqlite3')
+    server.preview_key=secrets.token_bytes(32)
+    workspace=api_v1.state(server);workspace.initialize_baseline(server.mail)
+    server.gmail=Gmail(workspace);server.mail=CombinedMail(server.mail,server.gmail)
+    def worker():
+        last_purge=0
+        while True:
+            time.sleep(15)
+            if time.time()-last_purge>3600:
+                last_purge=time.time()
+                try:
+                    with MUTATION:
+                        n=server.mail.purge_spam()
+                    if n:print('Nullmail spam retention purged %d message(s)'%n,flush=True)
+                except Exception:print('Nullmail spam retention purge failed',flush=True)
+            try:
+                with MUTATION:
+                    identities=[a for p in control({'op':'status'})['projects'] for a in p['aliases']]
+                    for account in server.gmail.accounts():
+                        server.gmail.sync_page(account['actor'],account['id'])
+                    identities += [a['id'] for a in server.gmail.accounts('local-owner')]
+                    workspace.process_new(server.mail,identities)
+                    api_v1.reviews(server).collect()
+            except Exception:
+                # No message content or credentials in logs. A claimed run is
+                # never retried automatically after an uncertain filesystem step.
+                print('Nullmail rule scan failed; inspect run history',flush=True)
+    threading.Thread(target=worker,daemon=True).start()
     server.serve_forever()
 
 if __name__=='__main__': serve()

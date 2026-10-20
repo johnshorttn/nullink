@@ -13,13 +13,13 @@ talks HTTPS Bearer to Nullink and is **not** part of `nullink.service`.
 
 ## Mint a scoped token (admin cookie)
 
-1. Log into https://nullink.216.158.238.236.sslip.io with the OTP PIN (sets `morc_session`).
+1. Log into https://nullink.216.158.238.236.sslip.io with the OTP PIN (sets `__Host-nullink_session`; token create/revoke require a code entered within the last 5 minutes — log in fresh or POST /api/auth/stepup {"code":...}).
 2. Create a ChatGPT-scoped token:
 
 ```bash
 curl -sS -X POST 'https://nullink.216.158.238.236.sslip.io/api/auth/tokens' \
   -H 'Content-Type: application/json' \
-  -b 'morc_session=YOUR_COOKIE' \
+  -b '__Host-nullink_session=YOUR_COOKIE' \
   -d '{
     "name": "chatgpt-mcp",
     "scopes": [
@@ -39,8 +39,8 @@ Plaintext `token` (`nlk_…`) is returned **once**. Store it as `NULLINK_TOKEN`.
 List / revoke (metadata only on list):
 
 ```bash
-curl -sS -b 'morc_session=…' https://nullink.216.158.238.236.sslip.io/api/auth/tokens
-curl -sS -X DELETE -b 'morc_session=…' \
+curl -sS -b '__Host-nullink_session=…' https://nullink.216.158.238.236.sslip.io/api/auth/tokens
+curl -sS -X DELETE -b '__Host-nullink_session=…' \
   https://nullink.216.158.238.236.sslip.io/api/auth/tokens/TOKEN_ID
 ```
 
@@ -82,4 +82,4 @@ curl -sS -H "$AUTH" "$BASE/api/ping?change=0"
 
 - Do **not** run this inside Nullink core / convert Nullink into MCP.
 - Keep `/api/ping` as the wake detector (no long-lived `/api/watch`).
-- Human UI continues to use `morc_session` OTP cookie.
+- Human UI uses the server-side `__Host-nullink_session` cookie (revocable; sign out everywhere: POST /api/auth/logout-all).

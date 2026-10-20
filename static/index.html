@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Nullink</title>
   <link rel="stylesheet" href="/tokens.css?v=fluid4c" />
-  <link rel="stylesheet" href="/style.css?v=fluid4c" />
+  <link rel="stylesheet" href="/style.css?v=fluid4c-mail1-rp3" />
 </head>
 <body>
   <div id="app">
@@ -33,6 +33,16 @@
           <button type="submit" id="pin-submit">Unlock</button>
         </form>
         <p id="auth-error" class="error" role="alert"></p>
+        <button type="button" id="guest-request-btn" class="ghost guest-link">Request guest access</button>
+        <div id="guest-request-box" class="guest-box hidden">
+          <input id="guest-name" maxlength="80" placeholder="Your name (e.g. Replit AI)" />
+          <input id="guest-reason" maxlength="200" placeholder="Reason (e.g. examine layout)" />
+          <button type="button" id="guest-request-send" class="ghost">Send request</button>
+          <p id="guest-request-status" class="hint guest-status" role="status"></p>
+          <input id="guest-pin" maxlength="12" placeholder="Guest PIN (XXXXX-XXXXX)" autocomplete="off" />
+          <button type="button" id="guest-redeem-send" class="ghost">Enter with guest PIN</button>
+          <p id="guest-redeem-error" class="error guest-status" role="alert"></p>
+        </div>
       </div>
     </section>
 
@@ -73,6 +83,7 @@
           <button type="button" class="mode-tab active" data-mode="chat" id="tab-chat">Chat</button>
           <button type="button" class="mode-tab" data-mode="files" id="tab-files">Files</button>
           <button type="button" class="mode-tab" data-mode="apps" id="tab-apps">Apps</button>
+          <button type="button" class="mode-tab" data-mode="mail" id="tab-mail" title="Nullmail">Mail</button>
           <button type="button" class="mode-tab" data-mode="vault" id="tab-vault">Vault</button>
         </div>
 
@@ -119,10 +130,20 @@
         </div>
 
         <button type="button" id="security-btn" class="ghost">Authenticator security</button>
+        <button type="button" id="guest-access-btn" class="ghost hidden">Guest access</button>
+        <button type="button" id="guest-audit-btn" class="ghost hidden" onclick="location.href='/guest-audit'">Guest audit</button>
         <button type="button" id="logout-btn" class="ghost">Sign out</button>
+        <button type="button" id="logout-all-btn" class="ghost">Sign out everywhere</button>
         <button type="button" id="nl-resize-roster" class="nl-resize-handle" aria-label="Resize roster" title="Drag to resize roster"></button>
       </aside>
 
+      <div id="guest-modal" class="security-modal hidden" role="dialog" aria-modal="true" aria-labelledby="guest-title">
+        <div class="security-card">
+          <div class="security-head"><h2 id="guest-title">Guest access</h2> <a href="/guest-audit" id="guest-audit-link" style="margin-left:auto;margin-right:8px;font-size:.9rem">Audit log →</a>
+            <button type="button" id="guest-close" class="ghost tiny" aria-label="Close">×</button></div>
+          <div id="guest-list"><p class="hint">Loading…</p></div>
+        </div>
+      </div>
       <div id="security-modal" class="security-modal hidden" role="dialog" aria-modal="true" aria-labelledby="security-title">
         <div class="security-card">
           <div class="security-head">
@@ -173,6 +194,7 @@
             <button type="button" class="chrome-mode active" data-mode="chat" id="chrome-tab-chat">Chat</button>
             <button type="button" class="chrome-mode" data-mode="files" id="chrome-tab-files">Files</button>
             <button type="button" class="chrome-mode" data-mode="apps" id="chrome-tab-apps">Apps</button>
+            <button type="button" class="chrome-mode" data-mode="mail" id="chrome-tab-mail" title="Nullmail">Mail</button>
             <button type="button" class="chrome-mode" data-mode="vault" id="chrome-tab-vault">Vault</button>
           </div>
           <div class="chrome-layout" id="chrome-layout" title="Layout (wide screens)">
@@ -193,6 +215,7 @@
             <div class="chat-header-top">
               <button type="button" id="btn-chat-back" class="ghost tiny nl-chat-back" aria-label="Open roster" title="Roster">‹</button>
               <h2 id="chat-title">Chief of Staff (Morc)</h2>
+              <a id="chat-site-link" class="ghost tiny chat-site-link hidden" href="#" target="_blank" rel="noopener noreferrer"></a>
               <span id="status-dot" class="status" title="Connected">●</span>
               <button type="button" id="btn-chat-minimize-hdr" class="ghost tiny chat-min-btn" title="Minimize chat" aria-label="Minimize chat">─</button>
             </div>
@@ -301,6 +324,9 @@
               <span id="apps-meta" class="muted-meta"></span>
             </div>
             <div class="apps-toolbar">
+              <button type="button" id="btn-apps-signin" class="accent-btn toolbar-btn" disabled title="Sign into Guacamole as desk and open XFCE">Sign in</button>
+              <button type="button" id="btn-apps-fullscreen" class="ghost toolbar-btn" disabled title="Expand this app to full window">Full screen</button>
+              <button type="button" id="btn-apps-exit-fs" class="ghost toolbar-btn hidden" title="Return to normal Apps layout">Exit full screen</button>
               <button type="button" id="btn-apps-refresh" class="ghost toolbar-btn">Refresh</button>
               <button type="button" id="btn-apps-open" class="ghost toolbar-btn" disabled>Open tab</button>
             </div>
@@ -311,6 +337,23 @@
           </div>
           <div id="apps-frame-wrap" class="apps-frame-wrap hidden">
             <iframe id="apps-frame" class="apps-frame" title="App" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+          </div>
+        </div>
+
+        <!-- Nullmail main app panel -->
+        <div id="panel-mail" class="panel hidden">
+          <header class="apps-header">
+            <div class="apps-title-row">
+              <h2>Nullmail</h2>
+              <span id="mail-meta" class="muted-meta"></span>
+            </div>
+            <div class="apps-toolbar">
+              <button type="button" id="btn-mail-reload" class="ghost toolbar-btn">Reload</button>
+              <a id="btn-mail-open" class="ghost toolbar-btn" href="https://nullmail.nullverse.cloud/" target="_blank" rel="noopener">Open in new tab</a>
+            </div>
+          </header>
+          <div class="apps-frame-wrap mail-frame-wrap">
+            <iframe id="mail-frame" class="apps-frame" title="Nullmail" allow="clipboard-read; clipboard-write"></iframe>
           </div>
         </div>
 
@@ -377,15 +420,30 @@
           <button type="button" id="btn-tools-close" class="ghost tiny" aria-label="Close tools">×</button>
         </header>
         <div class="nl-tools-sheet__grid" role="list">
+          <button type="button" class="nl-tools-tile" data-tool="mail" role="listitem">
+            <span class="nl-tools-tile__icon" aria-hidden="true">✉️</span>
+            <span class="nl-tools-tile__label">Mail</span>
+            <span class="nl-tools-tile__hint">Nullmail</span>
+          </button>
           <button type="button" class="nl-tools-tile" data-tool="files" role="listitem">
             <span class="nl-tools-tile__icon" aria-hidden="true">📁</span>
             <span class="nl-tools-tile__label">Files</span>
             <span class="nl-tools-tile__hint">Upload &amp; edit</span>
           </button>
+          <button type="button" class="nl-tools-tile" data-tool="terminal" role="listitem">
+            <span class="nl-tools-tile__icon" aria-hidden="true">⌨️</span>
+            <span class="nl-tools-tile__label">Terminal</span>
+            <span class="nl-tools-tile__hint">SSH · owner only</span>
+          </button>
           <button type="button" class="nl-tools-tile" data-tool="desktop" role="listitem">
             <span class="nl-tools-tile__icon" aria-hidden="true">🖥️</span>
             <span class="nl-tools-tile__label">Desktop</span>
             <span class="nl-tools-tile__hint">VPS Guacamole</span>
+          </button>
+          <button type="button" class="nl-tools-tile" data-tool="phone-drive" role="listitem">
+            <span class="nl-tools-tile__icon" aria-hidden="true">📱</span>
+            <span class="nl-tools-tile__label">Phone Drive</span>
+            <span class="nl-tools-tile__hint">Pair &amp; browse shared folders</span>
           </button>
           <button type="button" class="nl-tools-tile" data-tool="android" role="listitem">
             <span class="nl-tools-tile__icon" aria-hidden="true">📱</span>
@@ -418,6 +476,10 @@
           <button type="button" id="btn-workspace-collapse" class="ghost tiny" title="Collapse workspace" aria-label="Collapse workspace">›</button>
         </div>
         <div class="nl-workspace-body" role="list">
+          <button type="button" class="nl-workspace-tile" data-tool="mail" role="listitem">
+            <span class="nl-workspace-tile__label">Mail</span>
+            <span class="nl-workspace-tile__hint">Nullmail</span>
+          </button>
           <button type="button" class="nl-workspace-tile" data-tool="files" role="listitem">
             <span class="nl-workspace-tile__label">Files</span>
             <span class="nl-workspace-tile__hint">Browse &amp; edit</span>
@@ -426,9 +488,17 @@
             <span class="nl-workspace-tile__label">Apps</span>
             <span class="nl-workspace-tile__hint">Allowlisted</span>
           </button>
+          <button type="button" class="nl-workspace-tile" data-tool="terminal" role="listitem">
+            <span class="nl-workspace-tile__label">Terminal</span>
+            <span class="nl-workspace-tile__hint">SSH · owner only</span>
+          </button>
           <button type="button" class="nl-workspace-tile" data-tool="desktop" role="listitem">
             <span class="nl-workspace-tile__label">Desktop</span>
             <span class="nl-workspace-tile__hint">VPS Guacamole</span>
+          </button>
+          <button type="button" class="nl-workspace-tile" data-tool="phone-drive" role="listitem">
+            <span class="nl-workspace-tile__label">Phone Drive</span>
+            <span class="nl-workspace-tile__hint">Pair &amp; browse shared folders</span>
           </button>
           <button type="button" class="nl-workspace-tile" data-tool="android" role="listitem">
             <span class="nl-workspace-tile__label">Android</span>
@@ -466,6 +536,10 @@
   </div>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
-  <script src="/app.js?v=fluid4c"></script>
+  <div id="guest-banner" class="guest-banner hidden" role="status"></div>
+  <script src="/vendor/socket.io.min.js?v=4.8.1"></script>
+  <script src="/app.js?v=sio1-ssh1-vault1"></script>
+  <script src="/guest.js?v=g4"></script>
+  <div id="apps-fs-chrome" class="apps-fs-chrome hidden"><button type="button" id="btn-apps-exit-fs-floating" class="accent-btn toolbar-btn">Exit full screen</button></div>
 </body>
 </html>

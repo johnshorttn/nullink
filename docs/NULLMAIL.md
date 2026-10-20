@@ -1,3 +1,5 @@
+Current outbound activation: [NULLMAIL-OUTBOUND.md](NULLMAIL-OUTBOUND.md). The paused state below describes the initial release.
+
 # Nullmail deployment — 2026-10-06
 
 URL: **https://nullmail.nullverse.cloud**. Linked from the protected

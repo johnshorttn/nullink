@@ -4,11 +4,13 @@ from email.parser import BytesParser
 from email.message import EmailMessage
 from email.utils import getaddresses, make_msgid, formatdate
 import hashlib, json, os, re, secrets, sqlite3, stat, time
+import compose
 from contextlib import contextmanager
 from pathlib import Path
 
 ALIASES = ('admin', 'support', 'billing', 'hello', 'storycast', 'postmaster', 'abuse')
-FOLDERS = {'inbox': '', 'trash': '.Trash', 'sent': '.Sent'}
+FOLDERS = {'inbox': '', 'trash': '.Trash', 'sent': '.Sent', 'archive': '.Archive', 'spam': '.Junk'}
+SPAM_DAYS = 30
 MAX_MAIL = 2 * 1024 * 1024
 
 def header(value, limit=998):
@@ -71,8 +73,13 @@ class MailStore:
 
     def metadata(self, p, msg):
         recipient = str(msg.get('X-Original-To') or msg.get('To') or '')
+        # Postfix virtual(8) prepends this delivery prefix ahead of untrusted
+        # sender headers. Only the first original recipient is authoritative.
+        prefix=[k.lower() for k,_ in list(msg.raw_items())[:4]]
+        original=str(msg.get('X-Original-To','')).strip().lower()
+        envelope=original if prefix==['return-path','x-original-to','delivered-to','received'] and str(msg.get('Delivered-To','')).strip().lower()=='john@nullverse.cloud' and re.fullmatch(r'[^\s<>@]+@[^\s<>@]+',original) else None
         return {'id': self.key(p), 'from': str(msg.get('From', '')), 'to': str(msg.get('To', '')),
-                'recipient': recipient, 'subject': str(msg.get('Subject', '(No subject)')),
+                'recipient': recipient, 'envelope_recipient': envelope, 'subject': str(msg.get('Subject', '(No subject)')),
                 'date': str(msg.get('Date', '')), 'timestamp': p.stat().st_mtime,
                 'unread': 'S' not in p.name.partition(':2,')[2], 'size': p.stat().st_size}
 
@@ -103,7 +110,8 @@ class MailStore:
             else: has_html = True
         result.update(body='\n\n'.join(text) or ('This email contains HTML only. HTML is not rendered for safety.' if has_html else '(No plain-text body)'),
                       attachments=attachments, reply_to=str(msg.get('Reply-To') or msg.get('From') or ''),
-                      message_id=str(msg.get('Message-ID', '')))
+                      message_id=str(msg.get('Message-ID', '')), references=str(msg.get('References','')),
+                      in_reply_to=str(msg.get('In-Reply-To','')), headers='\n'.join(k+': '+str(v) for k,v in msg.items())[:200000])
         return result
 
     def attachment(self, folder, key, index):
@@ -111,6 +119,12 @@ class MailStore:
         allowed = {a['id']: a for a in self.message(folder, key)['attachments']}
         if index not in allowed: raise FileNotFoundError('Attachment not found')
         return allowed[index]['name'], list(msg.walk())[index].get_payload(decode=True) or b''
+
+    def source(self, folder, key):
+        return self.locate(folder, key).read_bytes()[:MAX_MAIL + 1], []
+
+    def eml(self, folder, key):
+        return self.source(folder, key)[0], False
 
     def flag(self, folder, key, read):
         p = self.locate(folder, key)
@@ -120,8 +134,8 @@ class MailStore:
         p.rename(target)
 
     def move(self, folder, key, target):
-        if target not in ('inbox', 'trash') or folder not in ('inbox', 'trash') or target == folder:
-            raise ValueError('Only trash and restore are supported')
+        if target not in ('inbox', 'trash', 'archive', 'spam') or folder not in ('inbox', 'trash', 'archive', 'spam') or target == folder:
+            raise ValueError('Only inbox, archive, spam and reversible trash moves are supported')
         p = self.locate(folder, key)
         dest = self.root / FOLDERS[target] / p.parent.name / p.name
         if dest.exists(): raise ValueError('Destination already exists')
@@ -153,11 +167,23 @@ class Drafts:
         clean = {'from': sender, 'to': header(data.get('to', ''), 2000), 'subject': header(data.get('subject', ''), 200),
                  'body': data.get('body', ''), 'in_reply_to': header(data.get('in_reply_to', ''), 998)}
         if not isinstance(clean['body'], str) or len(clean['body'].encode()) > 180000: raise ValueError('Draft is too large')
+        if data.get('body_html'):
+            # Rich text: never trust browser HTML. Sanitize, keep inline images as data: for re-editing,
+            # and regenerate the plain-text alternative server-side.
+            safe, images = compose.sanitize(data['body_html'])
+            clean['body_html'] = compose.restore_images(safe, images); clean['body'] = compose.to_text(safe)
+            if len(clean['body_html'].encode()) > 400000: raise ValueError('Draft is too large (inline images must stay small)')
+            delta = data.get('body_delta')
+            if isinstance(delta, str) and len(delta) <= 500000: clean['body_delta'] = delta
         with self.db() as db:
             current = db.execute('SELECT status FROM drafts WHERE id=?', (key,)).fetchone()
-            if current and current[0] not in ('draft', 'paused'): raise ValueError('Submitted messages cannot be edited')
+            if current and current[0] not in ('draft', 'paused', 'rejected'): raise ValueError('Submitted messages cannot be edited')
             db.execute('INSERT INTO drafts VALUES (?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET data=excluded.data, status=excluded.status, updated=excluded.updated', (key, json.dumps(clean), 'draft', time.time()))
         return self.get(key)
+    def claim(self, key):
+        with self.db() as db:
+            changed=db.execute("UPDATE drafts SET status='submitting',updated=? WHERE id=? AND status IN ('draft','paused','rejected')", (time.time(),key)).rowcount
+            if changed != 1: raise ValueError('Already submitted; duplicate send blocked')
     def status(self, key, status, queue=None):
         with self.db() as db: db.execute('UPDATE drafts SET status=?,queue_id=?,updated=? WHERE id=?', (status, queue, time.time(), key))
 
@@ -168,7 +194,13 @@ def build_message(draft, identities):
     for k,v in [('From',draft['from']),('To',draft['to']),('Subject',draft['subject'])]: msg[k] = header(v, 2000)
     if draft.get('in_reply_to'): msg['In-Reply-To'] = header(draft['in_reply_to'])
     msg['Date'] = formatdate(localtime=False); msg['Message-ID'] = make_msgid(domain='nullverse.cloud')
-    msg.set_content(draft['body'])
+    if draft.get('body_html'):
+        safe, images = compose.sanitize(draft['body_html'])
+        msg.set_content(compose.to_text(safe))
+        msg.add_alternative(compose.document(safe), subtype='html')
+        part = msg.get_payload()[1]
+        for img in images: part.add_related(img['data'], 'image', img['subtype'], cid='<%s>' % img['cid'], disposition='inline', filename=img['cid'].split('.')[0] + '.' + img['subtype'].replace('jpeg', 'jpg'))
+    else: msg.set_content(draft['body'])
     raw = msg.as_bytes()
     if len(raw) > 250000: raise ValueError('Message is too large for Postfix')
     return recipients, raw

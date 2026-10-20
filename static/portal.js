@@ -90,3 +90,35 @@
     if (document.hidden) pauseStatus(); else resumeStatus();
   });
 })();
+
+(function () {
+  function render(list) {
+    var ul = document.getElementById("reports-list");
+    if (!ul) return;
+    ul.textContent = "";
+    if (!list.length) { var e = document.createElement("li"); e.className = "status-note"; e.textContent = "No reports yet."; ul.appendChild(e); return; }
+    list.forEach(function (r) {
+      var li = document.createElement("li"), a = document.createElement("a");
+      a.className = "card"; a.href = r.url;
+      var d = document.createElement("span"); d.className = "details";
+      var h = document.createElement("h2"); h.textContent = r.title;
+      var p = document.createElement("p"); p.textContent = new Date(r.modified * 1000).toLocaleDateString(undefined, {year: "numeric", month: "short", day: "numeric"});
+      d.appendChild(h); d.appendChild(p); a.appendChild(d);
+      var ar = document.createElement("span"); ar.className = "arrow"; ar.setAttribute("aria-hidden", "true"); ar.textContent = "↗"; a.appendChild(ar);
+      li.appendChild(a); ul.appendChild(li);
+    });
+    var ml = document.createElement("li"), mk = document.createElement("a");
+    mk.className = "card"; mk.href = "/share-links";
+    var md = document.createElement("span"); md.className = "details";
+    var mh = document.createElement("h2"); mh.textContent = "Manage share links";
+    var mp = document.createElement("p"); mp.textContent = "Status, devices, revoke/extend, requests and audit log";
+    md.appendChild(mh); md.appendChild(mp); mk.appendChild(md); ml.appendChild(mk); ul.appendChild(ml);
+  }
+  function load() {
+    fetch("/api/portal/reports", {credentials: "same-origin", cache: "no-store"})
+      .then(function (r) { return r.ok ? r.json() : {reports: []}; })
+      .then(function (j) { render(j.reports || []); })
+      .catch(function () { render([]); });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", load); else load();
+})();

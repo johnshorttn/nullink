@@ -11,6 +11,7 @@ const fs=require('node:fs');
  await ctx.addCookies([{name:'__Host-nullink_session',value:token,url:'https://nullmail.nullverse.cloud/',secure:true,httpOnly:true,sameSite:'Lax'}]);
  await page.reload();await page.locator('#app').waitFor({state:'visible'});
  await page.waitForFunction(()=>document.querySelector('#inbox-count').textContent.trim()!=='');
+ assert.equal(await page.locator('.pause-banner strong').textContent(),'Outbound submission ready');
  const count=Number(await page.locator('#inbox-count').textContent());
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
  await page.click('#menu');await page.click('#projects-tab');await page.locator('#project-list .panel').first().waitFor();

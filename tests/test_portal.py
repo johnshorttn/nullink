@@ -17,12 +17,12 @@ class PortalTests(unittest.TestCase):
         root = Path(cls.tmp.name)
         cls.patches = [patch.object(server, name, root / filename) for name, filename in
                        [('OTP_FILE', 'otp.json'), ('TOTP_FILE', 'totp.json'),
-                        ('RATE_FILE', 'rate.json'), ('SESSION_SECRET_FILE', 'session.txt')]]
+                        ('RATE_FILE', 'rate.json'), ('SESSION_SECRET_FILE', 'session.txt'),
+                        ('SESSIONS_FILE', 'sessions.json')]]
         for item in cls.patches:
             item.start()
         server.SESSION_SECRET_FILE.write_text('isolated-test-secret')
-        server.OTP_FILE.write_text(json.dumps({'salt': 'test', 'pin_hash': server.hash_pin('123456', 'test'),
-                                               'expires_at': time.time() + 60}))
+        server.write_otp('123456', 60)
         cls.httpd = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
         cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
         cls.thread.start()
@@ -35,6 +35,17 @@ class PortalTests(unittest.TestCase):
         for item in reversed(cls.patches):
             item.stop()
         cls.tmp.cleanup()
+
+    @staticmethod
+    def session_cookie(expired=False):
+        value, rec = server.create_session('203.0.113.9', 'test', 'pin')
+        if expired:
+            sessions = server.load_sessions()
+            for key, item in sessions.items():
+                if item['id'] == rec['id']:
+                    item['expires_at'] = time.time() - 1
+            server.save_sessions(sessions)
+        return value
 
     def request(self, path, method='GET', cookie=None, host='nullverse.cloud', body=None, extra_headers=None):
         conn = http.client.HTTPConnection('127.0.0.1', self.httpd.server_port)
@@ -52,20 +63,25 @@ class PortalTests(unittest.TestCase):
         self.assertIn(b'id="pin-form"', self.request('/')[2])
         self.assertEqual(self.request('/projects')[0], 302)
         self.assertEqual(self.request('/projects', cookie='morc_session=forged')[0], 302)
+        self.assertEqual(self.request('/projects', cookie=server.COOKIE_NAME + '=forged')[0], 302)
         status, headers, _ = self.request('/api/auth/verify', 'POST', body=json.dumps({'code': '123456'}))
         self.assertEqual(status, 200)
         cookie = headers['Set-Cookie'].split(';')[0]
-        for flag in ['Secure', 'HttpOnly', 'SameSite=Lax']:
+        self.assertTrue(cookie.startswith('__Host-nullink_session='))
+        for flag in ['Secure', 'HttpOnly', 'SameSite=Lax', 'Path=/']:
             self.assertIn(flag, headers['Set-Cookie'])
         self.assertNotIn('Domain=', headers['Set-Cookie'])
         self.assertEqual(self.request('/', cookie=cookie)[1]['Location'], '/projects')
         self.assertIn(b'Coming soon', self.request('/projects', cookie=cookie)[2])
-        expired = server.COOKIE_NAME + '=' + server.sign_session(int(time.time()) - 1)
+        expired = server.COOKIE_NAME + '=' + self.session_cookie(expired=True)
         self.assertEqual(self.request('/projects', cookie=expired)[1]['Location'], '/')
         status, headers, _ = self.request('/api/auth/logout', 'POST', cookie=cookie)
         self.assertEqual(status, 200)
         self.assertIn('Max-Age=0', headers['Set-Cookie'])
         self.assertEqual(self.request('/projects', cookie=headers['Set-Cookie'].split(';')[0])[0], 302)
+        # The copied pre-logout cookie is revoked server-side.
+        self.assertEqual(self.request('/projects', cookie=cookie)[0], 302)
+        cookie = server.COOKIE_NAME + '=' + self.session_cookie()
         self.assertEqual(self.request('/', host='evil.example')[0], 421)
         self.assertEqual(self.request('/api/sessions')[0], 404)
         self.assertEqual(self.request('/portal.html')[0], 404)
@@ -75,18 +91,18 @@ class PortalTests(unittest.TestCase):
             self.assertEqual(self.request(path)[0], 200)
 
     def test_status_rejects_bearer_and_forwarded_host(self):
-        token = server.sign_session(int(time.time()) + 60)
+        token = self.session_cookie()
         with patch.object(server, 'collect_portal_status') as collect:
             self.assertEqual(self.request('/api/portal/status', extra_headers={
                 'Authorization': 'Bearer ' + token})[0], 401)
             self.assertEqual(self.request('/api/portal/status', host='nullink.nullverse.cloud',
-                cookie='morc_session=' + token,
+                cookie=server.COOKIE_NAME + '=' + token,
                 extra_headers={'X-Forwarded-Host': 'nullverse.cloud'})[0], 404)
             collect.assert_not_called()
 
     def test_status_auth_host_guard_and_failure(self):
-        valid = server.COOKIE_NAME + '=' + server.sign_session(int(time.time()) + 60)
-        expired = server.COOKIE_NAME + '=' + server.sign_session(int(time.time()) - 1)
+        valid = server.COOKIE_NAME + '=' + self.session_cookie()
+        expired = server.COOKIE_NAME + '=' + self.session_cookie(expired=True)
         with patch.object(server, 'collect_portal_status', return_value={'timestamp': 123}) as collect:
             for cookie in [None, 'morc_session=forged', expired]:
                 status, headers, _ = self.request('/api/portal/status', cookie=cookie)

@@ -30,9 +30,9 @@ try:
  assert request(base+'/api/projects',token,{'label':'must-not-register'},origin='https://evil.invalid',csrf=csrf)[0]==403
  assert request(base+'/api/projects',token,{'label':'must-not-register'},origin=base,csrf='bad')[0]==403
  status,_,html=request('https://nullverse.cloud/projects',token);assert status==200 and b'https://nullmail.nullverse.cloud' in html
- # Authenticated project helper write is idempotent: re-register an existing real seed.
- status,_,raw=request(base+'/api/projects',token,{'label':'axis'},origin=base,csrf=csrf);assert status==200,(status,raw[:100])
- print('PASS live API authentication, Origin/CSRF rejection, protected portal link, idempotent project registration')
+ status,_,raw=request(base+'/api/config',token);assert status==200
+ assert json.loads(raw)['outbound']['paused'] is False
+ print('PASS live API authentication, Origin/CSRF rejection, protected portal link, outbound enabled')
  subprocess.run(['node',str(pathlib.Path(__file__).with_name('live_browser.cjs'))],input=json.dumps({'token':token}),text=True,check=True,env=os.environ)
  assert request(base+'/api/session',token)[0]==401
  print('PASS real session revocation after browser logout')

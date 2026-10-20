@@ -23,7 +23,7 @@ def fake_control(data):
 
 def fixture(root):
     store=MailStore(root)
-    m=email.message.EmailMessage();m['From']='Fixture Sender <sender@example.com>';m['To']='hello@nullverse.cloud';m['X-Original-To']='hello@nullverse.cloud';m['Subject']='<img src=x onerror=alert(1)> Fixture inbox';m['Message-ID']='<fixture@example.com>'
+    m=email.message.EmailMessage();m['Return-Path']='<sender@example.com>';m['X-Original-To']='hello@nullverse.cloud';m['Delivered-To']='john@nullverse.cloud';m['Received']='by mail.nullverse.cloud for <hello@nullverse.cloud>';m['From']='Fixture Sender <sender@example.com>';m['To']='hello@nullverse.cloud';m['Subject']='<img src=x onerror=alert(1)> Fixture inbox';m['Message-ID']='<fixture@example.com>'
     m.set_content('Isolated fixture text. <script>window.pwned=1</script>');m.add_alternative('<script>window.pwned=1</script><img src="https://evil.invalid/pixel">',subtype='html')
     m.add_attachment(b'<script>alert(1)</script>',maintype='text',subtype='html',filename='../../unsafe".html')
     (root/'new'/'fixture-message').write_bytes(m.as_bytes())
@@ -80,6 +80,7 @@ class HttpTests(unittest.TestCase):
     def req(self,path,data=None,cookie='__Host-nullink_session=fixture',origin=app.ORIGIN,csrf=None,host='nullmail.nullverse.cloud'):
         c=http.client.HTTPConnection('127.0.0.1',self.server.server_port)
         h={'Host':host,'Cookie':cookie,'Origin':origin,'Content-Type':'application/json','X-CSRF-Token':csrf if csrf is not None else getattr(self,'csrf','')}
+        if origin is None: del h['Origin']
         c.request('GET' if data is None else 'POST',path,body=None if data is None else json.dumps(data),headers=h)
         r=c.getresponse();raw=r.read();status=r.status;headers=dict(r.getheaders());c.close()
         try:body=json.loads(raw)
@@ -96,6 +97,22 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(self.req(path,{},csrf='bad')[0],403)
             self.assertEqual(self.req(path,{},cookie='')[0],401)
         self.assertEqual(self.req('/api/auth/verify',{'code':'123456'},origin='https://evil.invalid')[0],403)
+    def test_dual_host_exact_origin_binding(self):
+        sslip='nullmail.216.158.238.236.sslip.io'; sslip_origin='https://'+sslip
+        self.assertEqual(self.req('/',host=sslip)[0],200)
+        self.assertEqual(self.req('/health',host=sslip)[0],200)
+        for path in ['/api/messages','/api/drafts','/api/config']:
+            self.assertEqual(self.req(path,cookie='',host=sslip)[0],401,path)
+        csrf=self.req('/api/session',host=sslip)[1]['csrf']
+        self.assertEqual(self.req('/api/drafts',{'from':'john@nullverse.cloud','to':'','subject':'s','body':'b'},host=sslip,origin=sslip_origin,csrf=csrf)[0],200)
+        self.assertEqual(self.req('/api/auth/verify',{'code':'123456'},host=sslip,origin=sslip_origin)[0],200)
+        # Origins never cross hosts, and unlisted origins/hosts are refused.
+        for host,origin in [(sslip,app.ORIGIN),('nullmail.nullverse.cloud',sslip_origin),(sslip,'https://evil.invalid'),
+                            (sslip,'http://'+sslip),(sslip,sslip_origin+':443'),(sslip,'null'),(sslip,None),('127.0.0.1:8789',sslip_origin)]:
+            self.assertEqual(self.req('/api/drafts',{},host=host,origin=origin,csrf=csrf)[0],403,(host,origin))
+            self.assertEqual(self.req('/api/auth/verify',{'code':'123456'},host=host,origin=origin)[0],403,(host,origin))
+        for host in ['nullmail.216.158.238.236.sslip.io.evil.invalid','nullverse.216.158.238.236.sslip.io','evil.sslip.io']:
+            self.assertEqual(self.req('/api/messages',host=host)[0],421,host)
     def test_read_download_draft_and_paused_send(self):
         rows=self.req('/api/messages')[1]['messages'];key=rows[0]['id']
         status,msg,_=self.req('/api/message?id='+key);self.assertEqual(status,200)
@@ -108,5 +125,40 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(self.req('/api/send',{'id':d['id']})[1]['status'],'paused')
         self.assertEqual(self.req('/api/projects',{'label':'fixture-project'})[0],200)
         self.assertEqual(self.req('/api/projects',{'label':'fixture-project','path':'/etc/passwd'})[0],400)
+
+    def test_enabled_submission_acceptance_and_duplicate_protection(self):
+        self.server.outbound_enabled=True
+        d=self.req('/api/drafts',{'from':'hello@nullverse.cloud','to':'reader@example.com','subject':'Fixture','body':'Hello'})[1]
+        with patch('transport.ssl.create_default_context'), patch('transport.smtplib.SMTP') as factory:
+            smtp=factory.return_value
+            smtp.mail.return_value=(250,b'OK');smtp.rcpt.return_value=(250,b'OK')
+            smtp.data.return_value=(250,b'Ok: queued as ABC123')
+            status,result,_=self.req('/api/send',{'id':d['id']})
+            self.assertEqual(status,200);self.assertEqual(result['status'],'accepted');self.assertEqual(result['queue_id'],'ABC123')
+            self.assertEqual(self.req('/api/send',{'id':d['id']})[0],400)
+            self.assertEqual(self.req('/api/drafts',dict(d,body='changed'))[0],400)
+            smtp.data.assert_called_once()
+        self.assertEqual(self.server.mail.listing('sent'),[])
+
+    def test_ambiguous_data_result_and_crash_claim_block_resend(self):
+        self.server.outbound_enabled=True
+        d=self.req('/api/drafts',{'from':'hello@nullverse.cloud','to':'reader@example.com','subject':'Fixture','body':'Hello'})[1]
+        with patch('transport.ssl.create_default_context'), patch('transport.smtplib.SMTP') as factory:
+            smtp=factory.return_value
+            smtp.mail.return_value=(250,b'OK');smtp.rcpt.return_value=(250,b'OK')
+            smtp.data.side_effect=TimeoutError('Lost acceptance response')
+            self.assertEqual(self.req('/api/send',{'id':d['id']})[1]['status'],'unknown')
+            self.assertEqual(self.req('/api/send',{'id':d['id']})[0],400)
+            smtp.data.assert_called_once()
+        e=self.req('/api/drafts',{'from':'hello@nullverse.cloud','to':'reader@example.com','body':'Crash fixture'})[1]
+        self.server.drafts.claim(e['id'])
+        self.assertEqual(self.req('/api/send',{'id':e['id']})[0],400)
+
+    def test_recipient_rejection_never_submits_data(self):
+        with patch('transport.ssl.create_default_context'), patch('transport.smtplib.SMTP') as factory:
+            smtp=factory.return_value
+            smtp.mail.return_value=(250,b'OK');smtp.rcpt.return_value=(550,b'No')
+            self.assertEqual(DirectPostfix(enabled=True).submit('hello@nullverse.cloud',['reader@example.com'],b'fixture')['status'],'rejected')
+            smtp.data.assert_not_called();smtp.rset.assert_called_once()
 
 if __name__=='__main__':unittest.main()

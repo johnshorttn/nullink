@@ -9,7 +9,7 @@ PRODUCTION (VPS — prefer this):
   SSH helper: /workspace/server/scripts/nullink-ssh.sh
   Runbook: /workspace/server/NULLINK-SERVER.md
   Fresh OTP on VPS: ssh … 'cd /opt/nullink && python3 set_otp.py'
-  Clear PIN (this box copy): /workspace/server/secrets/nullink-CURRENT_PIN.txt
+  PIN: single-use, printed once by set_otp.py (no clear-text copy is kept anywhere)
   Morc reply on VPS: ssh … 'cd /opt/nullink && python3 reply.py "…"'
 
 LOCAL / LEGACY tunnels (box only — superseded by VPS HTTPS above):
@@ -34,10 +34,10 @@ OTP / PIN
     python3 /workspace/chat-bridge/set_otp.py
     python3 /workspace/chat-bridge/set_otp.py 123456
   or localhost only: POST /api/admin/set-otp {"pin":"123456"}
-- Clear PIN for telling John: /workspace/chat-bridge/secrets/CURRENT_PIN.txt
+- PIN is printed ONCE by set_otp.py for relaying; it is never stored in clear text
 - Hashed store: /workspace/chat-bridge/secrets/otp.json
-- John enters PIN on landing page → 24h httpOnly session cookie (morc_session)
-- Rate limit: 5 failed attempts → 15 minute lock
+- PIN/TOTP/recovery code → 24h server-side session; cookie __Host-nullink_session (HTTPS) / nullink_session (local http); PIN is consumed on use
+- Lockout: per client IP 5 fails → 15 min, doubling per lockout (max 24h); global ceiling 50 fails/hour → 30 min; set_otp.py clears lockouts
 - Do not log raw PIN
 
 PM features (v1)
@@ -127,12 +127,12 @@ Written: 2026-09-16 14:37:36 UTC
 Scoped Bearer tokens (agent auth) — 2026-09-17
 -----------------------------------------------
 - Store: data/auth_tokens.json (SHA-256 hash at rest; plaintext returned once)
-- Admin (cookie morc_session only):
+- Admin (session cookie + step-up within 5 min):
     POST   /api/auth/tokens   {"name","scopes","sessions","expires_in?"}
     GET    /api/auth/tokens   (metadata only; no plaintext)
     DELETE /api/auth/tokens/<id>
 - Agents: Authorization: Bearer nlk_…
-- Precedence: Bearer → else morc_session. /health public. UI cookie unchanged.
+- Precedence: Bearer → else session cookie. /health public. UI cookie unchanged.
 - GET /api/messages returns {messages, next_after, has_more}; limit 1..100
 - ChatGPT-scoped tokens 403 on session=morc
 - MCP adapter (separate stdio, NOT in request path):
@@ -140,3 +140,13 @@ Scoped Bearer tokens (agent auth) — 2026-09-17
     env NULLINK_URL=https://nullink.216.158.238.236.sslip.io
     env NULLINK_TOKEN=nlk_…   (mint via POST /api/auth/tokens; VPS may keep
     secrets/NULLINK_TOKEN_chatgpt.txt mode 600)
+
+Auth hardening — 2026-10-06
+- PIN: secrets-generated, PBKDF2-hashed (secrets/otp.json), single-use, 24h max; no CURRENT_PIN.txt.
+- Sessions: data/auth_sessions.json (SHA-256 of session id at rest). Logout revokes server-side;
+  POST /api/auth/logout-all = sign out everywhere; GET /api/auth/sessions lists sessions.
+- Step-up: POST /api/auth/stepup {"code"} (TOTP/recovery/PIN); required within 5 min for TOTP
+  setup/confirm/disable and token create/revoke.
+- /api/desktop/credentials removed (410); desktop uses /api/desktop/launch auto sign-in.
+- is_localhost() rejects any request carrying X-Forwarded-*/Forwarded/X-Real-IP; Caddy also 403s
+  /api/admin/* and /api/files/register; Caddy sends HSTS on Nullink hosts + nullverse.cloud.
