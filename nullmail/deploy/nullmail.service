@@ -1,0 +1,32 @@
+[Unit]
+Description=Nullmail private web mailbox
+After=network.target nullink.service nullmail-control.service
+Requires=nullmail-control.service
+[Service]
+User=nullmail
+Group=nullmail
+WorkingDirectory=/usr/local/lib/nullmail
+ExecStart=/usr/bin/python3 /usr/local/lib/nullmail/app.py
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/nullmail
+InaccessiblePaths=/opt/nullink/secrets /var/spool/postfix /etc/postfix/tls
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictSUIDSGID=yes
+ProtectProc=invisible
+TasksMax=64
+MemoryMax=256M
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+[Install]
+WantedBy=multi-user.target

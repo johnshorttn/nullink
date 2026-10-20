@@ -1,0 +1,10 @@
+# Nullmail: isolated host-only session, private loopback backend.
+nullmail.nullverse.cloud, nullmail.216.158.238.236.sslip.io {
+	header Strict-Transport-Security "max-age=31536000"
+	request_body {
+		max_size 220KB
+	}
+	reverse_proxy 127.0.0.1:8789 {
+		header_up X-Nullmail-Client-IP {remote_host}
+	}
+}

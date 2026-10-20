@@ -24,7 +24,7 @@ Give John a working public HTTPS URL + a fresh 6-digit PIN so he can open **Null
 
 3. **Mint / rotate OTP**
    - `python3 /workspace/chat-bridge/set_otp.py`
-   - Clear PIN: `/workspace/chat-bridge/secrets/CURRENT_PIN.txt`
+   - Clear PIN: (none — set_otp.py prints the single-use PIN once)
    - Do not log the PIN to shared logs; tell John in chat only.
 
 4. **Reply to John in chat**
@@ -91,7 +91,7 @@ Give John a working public HTTPS URL + a fresh 6-digit PIN so he can open **Null
 |------|------|
 | App | `/workspace/chat-bridge/` |
 | Host card | `/workspace/chat-bridge/HOST.txt` |
-| PIN (clear) | `/workspace/chat-bridge/secrets/CURRENT_PIN.txt` |
+| PIN (clear) | (none — set_otp.py prints the single-use PIN once) |
 | Labels | `data/labels.json` |
 | Files registry | `data/files.json` |
 | Uploads | `uploads/` |

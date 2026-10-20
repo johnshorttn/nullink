@@ -1,0 +1,24 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>Share links · Nullverse</title>
+<style>body{margin:0;background:#0b0d18;color:#eef;font:14px/1.45 system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:16px}
+a{color:#9db0ff}table{border-collapse:collapse;width:100%;margin:8px 0 24px}td,th{border-bottom:1px solid #2b3150;padding:6px;text-align:left;vertical-align:top}
+.st{font-weight:600}.active{color:#9fe0b0}.expired,.revoked{color:#ff9a9a}.unopened{color:#ffd479}
+button{font:inherit;border:1px solid #4b5bd6;background:#1c2350;color:#fff;border-radius:6px;padding:4px 10px;cursor:pointer}
+.wrap{overflow-x:auto}small{color:#99a}</style></head><body><main>
+<p><a href="/projects">← Projects</a></p><h1>Report share links</h1>
+<div class="wrap"><table id="links"><thead><tr><th>Report</th><th>Link</th><th>Status</th><th>Device / IP</th><th>Expires</th><th></th></tr></thead><tbody></tbody></table></div>
+<h2>Requests</h2><div class="wrap"><table id="reqs"><thead><tr><th>When</th><th>Kind</th><th>From</th><th>Reason</th><th>Status</th></tr></thead><tbody></tbody></table></div>
+<h2>Audit log</h2><div class="wrap"><table id="audit"><thead><tr><th>When</th><th>Event</th><th>Details</th></tr></thead><tbody></tbody></table></div>
+</main><script>
+function t(s){return s?new Date(s*1000).toLocaleString():'—'}
+function row(tb,cells){var tr=document.createElement('tr');cells.forEach(function(c){var td=document.createElement('td');if(c instanceof Node)td.appendChild(c);else td.textContent=c==null?'':c;tr.appendChild(td)});tb.appendChild(tr);return tr}
+function act(id,a){fetch('/api/share/links/'+id+'/'+a,{method:'POST',credentials:'same-origin'}).then(load)}
+function load(){fetch('/api/share/links',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
+var tb=document.querySelector('#links tbody');tb.textContent='';(j.links||[]).forEach(function(l){var s=document.createElement('span');s.className='st '+l.status;s.textContent=l.status;
+var b=document.createElement('span');if(l.status!=='revoked'){var e=document.createElement('button');e.textContent='+24h';e.onclick=function(){act(l.id,'extend')};var r=document.createElement('button');r.textContent='Revoke';r.onclick=function(){if(confirm('Revoke '+l.id+'?'))act(l.id,'revoke')};b.appendChild(e);b.append(' ');b.appendChild(r)}
+row(tb,[l.report,l.id+(l.kind==='ai'?' [AI · '+l.opens+'/'+l.max_opens+' opens · '+l.ttl+']':' [person]')+(l.for_name?' (for '+l.for_name+')':'')+(l.parent?' ← '+l.parent:''),s,l.ip?((l.kind==='ai'?'last: ':'')+l.ip+' · '+(l.ua||'').slice(0,60)):'not opened',l.expires_at?t(l.expires_at):'24h after first open',b])});
+var rq=document.querySelector('#reqs tbody');rq.textContent='';(j.requests||[]).forEach(function(r){row(rq,[t(r.created_at),r.kind+(r.teammate_email?' → '+r.teammate_name+' <'+r.teammate_email+'>':''),r.name+' <'+r.email+'> '+r.ip,r.reason,r.status])})});
+fetch('/api/share/audit',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json()}).then(function(j){var tb=document.querySelector('#audit tbody');tb.textContent='';
+(j.rows||[]).slice(0,300).forEach(function(a){var d=Object.assign({},a);delete d.ts;delete d.event;row(tb,[t(a.ts),a.event,JSON.stringify(d)])})})}
+load();setInterval(load,15000);
+</script></body></html>

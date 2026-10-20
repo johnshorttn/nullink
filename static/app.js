@@ -13,6 +13,7 @@
   const composeInput = document.getElementById("compose-input");
   const rosterRoot = document.getElementById("roster-root");
   const logoutBtn = document.getElementById("logout-btn");
+  const logoutAllBtn = document.getElementById("logout-all-btn");
   const securityBtn = document.getElementById("security-btn");
   const securityModal = document.getElementById("security-modal");
   const securityClose = document.getElementById("security-close");
@@ -41,6 +42,8 @@
   const tabFiles = document.getElementById("tab-files");
   const tabApps = document.getElementById("tab-apps");
   const tabVault = document.getElementById("tab-vault");
+  const tabMail = document.getElementById("tab-mail");
+  const chromeTabMail = document.getElementById("chrome-tab-mail");
   const chromeTabChat = document.getElementById("chrome-tab-chat");
   const chromeTabFiles = document.getElementById("chrome-tab-files");
   const chromeTabApps = document.getElementById("chrome-tab-apps");
@@ -64,6 +67,23 @@
   const panelFiles = document.getElementById("panel-files");
   const panelApps = document.getElementById("panel-apps");
   const panelVault = document.getElementById("panel-vault");
+  const panelMail = document.getElementById("panel-mail");
+  const mailFrame = document.getElementById("mail-frame");
+  const mailMeta = document.getElementById("mail-meta");
+  const btnMailReload = document.getElementById("btn-mail-reload");
+  const btnMailOpen = document.getElementById("btn-mail-open");
+  function nullmailUrl() {
+    const h = location.hostname || "";
+    if (/\.216\.158\.238\.236\.sslip\.io$/.test(h)) return "https://nullmail.216.158.238.236.sslip.io/";
+    return "https://nullmail.nullverse.cloud/";
+  }
+  function ensureMailLoaded(force) {
+    if (!mailFrame) return;
+    const url = nullmailUrl();
+    if (btnMailOpen) btnMailOpen.href = url;
+    if (mailMeta) mailMeta.textContent = url.replace(/^https:\/\//, "").replace(/\/$/, "");
+    if (force || !mailFrame.getAttribute("src")) mailFrame.src = url;
+  }
   const chatSidebar = document.getElementById("chat-sidebar");
   const filesSidebar = document.getElementById("files-sidebar");
   const appsSidebar = document.getElementById("apps-sidebar");
@@ -593,6 +613,8 @@
       goMode("apps");
     } else if (tool === "vault") {
       goMode("vault");
+    } else if (tool === "mail") {
+      goMode("mail");
     } else if (tool === "desktop") {
       goMode("apps");
       loadApps().then(() => {
@@ -643,6 +665,10 @@
           }
         }
       });
+    } else if (tool === "terminal") {
+      // SSH terminal (2026-10-19): own full-screen page, owner session + authenticator code
+      const w = window.open("/ssh/", "_blank");
+      if (w) { try { w.opener = null; } catch (e) { /* ignore */ } } else window.location.href = "/ssh/";
     } else if (tool === "playground") {
       goMode("files");
       labelFilterSet.clear();
@@ -662,6 +688,8 @@
       mark(tabFiles, layout.secondary === "files");
       mark(tabApps, layout.secondary === "apps");
       mark(tabVault, false);
+      mark(tabMail, false);
+      mark(chromeTabMail, false);
       mark(chromeTabChat, true);
       mark(chromeTabFiles, layout.secondary === "files");
       mark(chromeTabApps, layout.secondary === "apps");
@@ -675,6 +703,8 @@
       mark(chromeTabFiles, mode === "files");
       mark(chromeTabApps, mode === "apps");
       mark(chromeTabVault, mode === "vault");
+      mark(tabMail, mode === "mail");
+      mark(chromeTabMail, mode === "mail");
     }
     if (btnSplit) {
       const splitLive = !!(layout.split && isWideSplit());
@@ -705,6 +735,7 @@
       panelFiles.classList.toggle("hidden", layout.secondary !== "files");
       panelApps.classList.toggle("hidden", layout.secondary !== "apps");
       if (panelVault) panelVault.classList.add("hidden");
+      if (panelMail) panelMail.classList.add("hidden");
       chatSidebar.classList.remove("hidden");
       filesSidebar.classList.toggle("hidden", layout.secondary !== "files");
       appsSidebar.classList.toggle("hidden", layout.secondary !== "apps");
@@ -723,6 +754,7 @@
       panelFiles.classList.toggle("hidden", mode !== "files");
       panelApps.classList.toggle("hidden", mode !== "apps");
       if (panelVault) panelVault.classList.toggle("hidden", mode !== "vault");
+      if (panelMail) panelMail.classList.toggle("hidden", mode !== "mail");
       chatSidebar.classList.toggle("hidden", mode !== "chat");
       filesSidebar.classList.toggle("hidden", mode !== "files");
       appsSidebar.classList.toggle("hidden", mode !== "apps");
@@ -765,9 +797,18 @@
     authView.classList.remove("hidden");
     chatView.classList.add("hidden");
     stopRealtime();
+    if (rtSocket) { try { rtSocket.disconnect(); } catch (_) {} rtSocket = null; }
   }
 
   function showApp() {
+    if (location.hostname === "nullverse.cloud" ||
+        location.hostname === "nullverse.216.158.238.236.sslip.io") {
+      // Return to a requested short path (/link, /mail...) after sign-in.
+      // Same-origin relative only; the server re-validates against the map.
+      const next = new URLSearchParams(location.search).get("next") || "";
+      location.replace(/^\/[a-z0-9][a-z0-9-]{0,31}$/.test(next) ? next : "/projects");
+      return;
+    }
     authView.classList.add("hidden");
     chatView.classList.remove("hidden");
     loadSessions();
@@ -794,7 +835,7 @@
 
   function setMode(next, opts) {
     const options = opts || {};
-    if (next !== "chat" && next !== "files" && next !== "apps" && next !== "vault") return;
+    if (next !== "chat" && next !== "files" && next !== "apps" && next !== "vault" && next !== "mail") return;
 
     if (layout.split && isWideSplit()) {
       if (next === "files" || next === "apps") {
@@ -823,7 +864,7 @@
   }
 
   function goMode(next) {
-    if (layout.split && isWideSplit() && next !== "vault") {
+    if (layout.split && isWideSplit() && next !== "vault" && next !== "mail") {
       setMode(next);
       return;
     }
@@ -843,6 +884,14 @@
       }
       setMode("vault");
       loadVaultList();
+    } else if (next === "mail") {
+      // Nullmail is full-mode only (not a split secondary)
+      if (layout.split) {
+        layout.split = false;
+        writeLayout();
+      }
+      setMode("mail");
+      ensureMailLoaded(false);
     } else {
       setMode("chat");
       composeInput.focus();
@@ -857,6 +906,9 @@
   if (chromeTabFiles) chromeTabFiles.addEventListener("click", () => goMode("files"));
   if (chromeTabApps) chromeTabApps.addEventListener("click", () => goMode("apps"));
   if (chromeTabVault) chromeTabVault.addEventListener("click", () => goMode("vault"));
+  if (tabMail) tabMail.addEventListener("click", () => goMode("mail"));
+  if (chromeTabMail) chromeTabMail.addEventListener("click", () => goMode("mail"));
+  if (btnMailReload) btnMailReload.addEventListener("click", () => ensureMailLoaded(true));
 
   if (btnNav) {
     btnNav.addEventListener("click", () => {
@@ -908,7 +960,7 @@
     syncBottomNav();
   });
   if (btnSplit) {
-    
+
   if (btnChatMin) btnChatMin.addEventListener("click", toggleChatMinimized);
   if (btnChatMinHdr) btnChatMinHdr.addEventListener("click", toggleChatMinimized);
   if (chatRestoreBar) chatRestoreBar.addEventListener("click", () => setChatMinimized(false));
@@ -958,6 +1010,65 @@ btnSplit.addEventListener("click", () => {
     if (!isNarrow()) closeNav();
   });
 
+  // ---- Realtime: Socket.IO push (2026-10-14) with HTTP polling fallback ----
+  let rtSocket = null;
+  let rtJoined = null;
+  const POLL_FAST = 1500, POLL_SLOW = 30000;
+  function setPoll(ms) {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(() => fetchMessages(false), ms);
+  }
+  function rtJoin() {
+    if (!rtSocket || !rtSocket.connected) return;
+    const session = activeSession;
+    rtSocket.timeout(8000).emit("join", { session, after: lastId }, (err, ack) => {
+      if (err || !ack || !ack.ok) {
+        rtJoined = null; setPoll(POLL_FAST);
+        statusDot.title = "Live (poll; socket join failed)";
+        return;
+      }
+      if (session !== activeSession) return;
+      rtJoined = session;
+      if (ack.messages && ack.messages.length) ingestMessages(ack.messages, false);
+      if (!ack.history_hidden) fetchMessages(false); // close any gap with the initial page load
+      setPoll(POLL_SLOW); // safety net only
+      statusDot.style.color = "var(--ok)";
+      statusDot.title = "Live (socket)";
+    });
+  }
+  function ensureSocket() {
+    if (rtSocket || typeof window.io !== "function") return rtSocket;
+    rtSocket = window.io({
+      path: "/socket.io", withCredentials: true, transports: ["websocket", "polling"],
+      reconnection: true, reconnectionDelay: 1000, reconnectionDelayMax: 15000,
+      randomizationFactor: 0.5, timeout: 10000,
+    });
+    rtSocket.on("connect", () => rtJoin());
+    rtSocket.on("disconnect", () => {
+      rtJoined = null;
+      if (!chatView.classList.contains("hidden")) setPoll(POLL_FAST);
+      statusDot.style.color = "var(--warn, #f5a524)";
+      statusDot.title = "Socket reconnecting (poll on)";
+    });
+    rtSocket.on("connect_error", () => {
+      rtJoined = null;
+      if (!chatView.classList.contains("hidden")) setPoll(POLL_FAST);
+      statusDot.title = "Live (poll; socket unavailable)";
+    });
+    rtSocket.on("message", (d) => {
+      if (!d || d.session !== activeSession) return;
+      ingestMessages(d.messages || [], false);
+    });
+    rtSocket.on("status", (d) => {
+      if (d && d.session === "replit" && activeSession === "replit" && typeof renderReplitStatus === "function") {
+        renderReplitStatus(d.data || {});
+      }
+    });
+    rtSocket.on("auth_expired", () => { try { rtSocket.disconnect(); } catch (_) {} fetchMessages(false); });
+    window.__nlRt = { get socket() { return rtSocket; }, get joined() { return rtJoined; }, get lastId() { return lastId; } };
+    return rtSocket;
+  }
+
   function stopRealtime() {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
@@ -967,68 +1078,32 @@ btnSplit.addEventListener("click", () => {
       try { eventSource.close(); } catch (_) {}
       eventSource = null;
     }
+    if (rtSocket && rtSocket.connected && rtJoined) { try { rtSocket.emit("leave", {}); } catch (_) {} }
+    rtJoined = null;
   }
 
   function startRealtime() {
     stopRealtime();
-    // Always poll as the reliable path (SSE behind Caddy can stall silently).
-    pollTimer = setInterval(() => fetchMessages(false), 1500);
+    setPoll(POLL_FAST); // until the socket confirms the join
     statusDot.title = "Live (poll)";
-    if (typeof EventSource !== "undefined") {
-      try { connectSSE(); } catch (_) {}
+    const s = ensureSocket();
+    if (s) {
+      if (s.connected) rtJoin(); else if (!s.active) s.connect();
     }
   }
 
-  function connectSSE() {
-    if (eventSource) {
-      try { eventSource.close(); } catch (_) {}
-      eventSource = null;
-    }
-    const url =
-      `/api/messages/stream?session=${encodeURIComponent(activeSession)}&after=${lastId}`;
-    eventSource = new EventSource(url, { withCredentials: true });
-    const onPayload = (ev) => {
-      try {
-        const d = JSON.parse(ev.data);
-        ingestMessages(d.messages || [], false);
-        statusDot.style.color = "var(--ok)";
-        statusDot.title = "Live (SSE+poll)";
-      } catch (_) {}
-    };
-    eventSource.addEventListener("message", onPayload);
-    eventSource.onmessage = onPayload; // default-data events too
-    eventSource.addEventListener("ping", () => {
-      statusDot.style.color = "var(--ok)";
-    });
-    eventSource.onopen = () => {
-      statusDot.style.color = "var(--ok)";
-      statusDot.title = "Live (SSE+poll)";
-      // Do NOT stop pollTimer — backup stays on.
-    };
-    eventSource.onerror = () => {
-      statusDot.style.color = "var(--warn, #f5a524)";
-      statusDot.title = "SSE reconnecting (poll still on)";
-      try { eventSource.close(); } catch (_) {}
-      eventSource = null;
-      if (!pollTimer) {
-        pollTimer = setInterval(() => fetchMessages(false), 1500);
-      }
-      setTimeout(() => {
-        if (chatView.classList.contains("hidden")) return;
-        try { connectSSE(); } catch (_) {}
-      }, 2000);
-    };
+  function rtWake() {
+    if (chatView.classList.contains("hidden")) return;
+    fetchMessages(false);
+    if (rtSocket && !rtSocket.connected) { try { rtSocket.connect(); } catch (_) {} }
   }
-
-  // Pull fresh messages when tab becomes visible again
+  // Phone woke / app reopened / network back: reconnect now instead of waiting out backoff.
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && !chatView.classList.contains("hidden")) {
-      fetchMessages(false);
-    }
+    if (document.visibilityState === "visible") rtWake();
   });
-  window.addEventListener("focus", () => {
-    if (!chatView.classList.contains("hidden")) fetchMessages(false);
-  });
+  window.addEventListener("focus", rtWake);
+  window.addEventListener("online", rtWake);
+  window.addEventListener("pageshow", rtWake);
 
   function formatWakeTs(ts) {
     if (!ts) return "never";
@@ -1319,7 +1394,9 @@ btnSplit.addEventListener("click", () => {
       const d = await r.json();
       const enabled = !!d.totp_enabled;
       authMethods.classList.toggle("hidden", !enabled);
-      selectAuthMethod(enabled ? "totp" : "pin");
+      // Keep a method the user picked by hand (e.g. PIN) across re-renders of the sign-in view.
+      const picked = window.__nlAuthPicked;
+      selectAuthMethod(enabled ? (picked || "totp") : "pin");
     } catch (_) {}
   }
 
@@ -1340,8 +1417,8 @@ btnSplit.addEventListener("click", () => {
     pinInput.focus();
   }
 
-  authMethodTotp.addEventListener("click", () => selectAuthMethod("totp"));
-  authMethodPin.addEventListener("click", () => selectAuthMethod("pin"));
+  authMethodTotp.addEventListener("click", () => { window.__nlAuthPicked = "totp"; selectAuthMethod("totp"); });
+  authMethodPin.addEventListener("click", () => { window.__nlAuthPicked = "pin"; selectAuthMethod("pin"); });
 
   pinInput.addEventListener("input", () => {
     if (pinInput.dataset.method === "totp") {
@@ -1387,6 +1464,30 @@ btnSplit.addEventListener("click", () => {
     showAuth();
   });
 
+  if (logoutAllBtn) {
+    logoutAllBtn.addEventListener("click", async () => {
+      if (!window.confirm("Sign out of Nullink on every device and browser?")) return;
+      await fetch("/api/auth/logout-all", { method: "POST", credentials: "include" });
+      showAuth();
+    });
+  }
+
+  // Sensitive actions need a fresh code (step-up) if login was > 5 minutes ago.
+  async function stepUpFetch(url, opts) {
+    let r = await fetch(url, opts);
+    if (r.status !== 403) return r;
+    const d = await r.clone().json().catch(() => ({}));
+    if (d.error !== "step_up_required") return r;
+    const code = (window.prompt("Confirm it's you: enter your authenticator code, a recovery code, or a fresh PIN.") || "").trim();
+    if (!code) return r;
+    const s = await fetch("/api/auth/stepup", {
+      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code.toUpperCase() }),
+    });
+    if (!s.ok) return s;
+    return fetch(url, opts);
+  }
+
   async function refreshSecurity() {
     securityError.textContent = "";
     const r = await fetch("/api/auth/method", { credentials: "include" });
@@ -1411,7 +1512,7 @@ btnSplit.addEventListener("click", () => {
 
   totpStart.addEventListener("click", async () => {
     securityError.textContent = "";
-    const r = await fetch("/api/auth/totp/setup", {
+    const r = await stepUpFetch("/api/auth/totp/setup", {
       method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ account: "owner" }),
     });
@@ -1429,7 +1530,7 @@ btnSplit.addEventListener("click", () => {
   });
   totpConfirm.addEventListener("click", async () => {
     securityError.textContent = "";
-    const r = await fetch("/api/auth/totp/confirm", {
+    const r = await stepUpFetch("/api/auth/totp/confirm", {
       method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code: totpConfirmCode.value }),
     });
@@ -1451,7 +1552,7 @@ btnSplit.addEventListener("click", () => {
   });
   totpDisable.addEventListener("click", async () => {
     securityError.textContent = "";
-    const r = await fetch("/api/auth/totp/disable", {
+    const r = await stepUpFetch("/api/auth/totp/disable", {
       method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code: totpDisableCode.value }),
     });
@@ -1480,10 +1581,26 @@ btnSplit.addEventListener("click", () => {
     } catch { /* ignore */ }
   }
 
+  const rosterBotsById = {};
+  function updateSiteLink(id) {
+    const a = document.getElementById("chat-site-link");
+    if (!a) return;
+    const b = rosterBotsById[id];
+    const ok = b && b.site_link && /^https:\/\//i.test(String(b.url || ""));
+    a.classList.toggle("hidden", !ok);
+    if (ok) {
+      a.href = b.url;
+      a.textContent = b.site_label || `Open ${b.title || b.id} site ↗`;
+      a.title = b.url;
+    }
+  }
+
   function selectBot(bot) {
     if (!bot || !bot.id) return;
     activeSession = bot.id;
     chatTitle.textContent = bot.title || bot.id;
+    updateSiteLink(bot.id);
+    syncReplitStatus();
     rosterRoot.querySelectorAll(".roster-bot").forEach((el) => {
       el.classList.toggle("active", el.dataset.id === bot.id);
     });
@@ -1530,6 +1647,7 @@ btnSplit.addEventListener("click", () => {
         list.appendChild(empty);
       } else {
         bots.forEach((bot) => {
+          if (bot && bot.id) rosterBotsById[bot.id] = bot;
           const li = document.createElement("li");
           li.className = "roster-bot";
           li.dataset.id = bot.id;
@@ -1582,6 +1700,8 @@ btnSplit.addEventListener("click", () => {
         if (cur) {
           chatTitle.textContent = cur.title || cur.id;
           if (cur.id !== activeSession) activeSession = cur.id;
+          updateSiteLink(activeSession);
+          syncReplitStatus();
         }
         loadSessionMemory(activeSession);
       } else {
@@ -2243,6 +2363,81 @@ btnSplit.addEventListener("click", () => {
     }
   }
 
+
+  // ---- Desktop sign-in + Apps fullscreen ----
+  const btnAppsSignin = document.getElementById("btn-apps-signin");
+  const btnAppsFullscreen = document.getElementById("btn-apps-fullscreen");
+  const btnAppsExitFs = document.getElementById("btn-apps-exit-fs");
+  const appsFsChrome = document.getElementById("apps-fs-chrome");
+  const btnAppsExitFsFloat = document.getElementById("btn-apps-exit-fs-floating");
+
+  function isDesktopishApp(app) {
+    if (!app) return false;
+    const url = app.embed_url || app.url || "";
+    return app.id === "desktop" || app.id === "gmail" || app.id === "messages" || String(url).startsWith("/desktop");
+  }
+
+  function setAppsChromeForApp(app) {
+    const has = !!(app && app.embed_url);
+    if (btnAppsOpen) btnAppsOpen.disabled = !has;
+    if (btnAppsFullscreen) btnAppsFullscreen.disabled = !has;
+    const desk = isDesktopishApp(app);
+    if (btnAppsSignin) btnAppsSignin.disabled = !desk;
+  }
+
+  async function launchDesktopSignedIn(opts) {
+    const newTab = !!(opts && opts.newTab);
+    if (appsMeta) appsMeta.textContent = "Signing into desktop…";
+    const r = await fetch("/api/desktop/launch", { credentials: "include" });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.embedUrl) {
+      throw new Error((d && (d.detail || d.error)) || "launch failed");
+    }
+    if (appsMeta) appsMeta.textContent = "Desktop signed in · " + (d.username || "desk") + " · Pixel: use Fullscreen; swipe right from the desktop’s left edge for keyboard, clipboard and zoom controls. Close/disconnect to keep apps running; Sign in again to resume.";
+    if (newTab) window.open(d.embedUrl, "_blank", "noopener");
+    else if (appsFrame) appsFrame.src = d.embedUrl;
+    return d;
+  }
+
+  function enterAppsFullscreen() {
+    if (!appsFrameWrap) return;
+    appsFrameWrap.classList.add("is-fullscreen");
+    appsFrameWrap.classList.remove("hidden");
+    document.body.classList.add("apps-immersive");
+    if (btnAppsExitFs) btnAppsExitFs.classList.remove("hidden");
+    if (btnAppsFullscreen) btnAppsFullscreen.classList.add("hidden");
+    if (appsFsChrome) appsFsChrome.classList.remove("hidden");
+    try { appsFrame && appsFrame.focus(); } catch (_) {}
+  }
+
+  function exitAppsFullscreen() {
+    if (!appsFrameWrap) return;
+    appsFrameWrap.classList.remove("is-fullscreen");
+    document.body.classList.remove("apps-immersive");
+    if (btnAppsExitFs) btnAppsExitFs.classList.add("hidden");
+    if (btnAppsFullscreen) btnAppsFullscreen.classList.remove("hidden");
+    if (appsFsChrome) appsFsChrome.classList.add("hidden");
+  }
+
+
+  if (btnAppsSignin) {
+    btnAppsSignin.addEventListener("click", () => {
+      launchDesktopSignedIn({ newTab: false }).catch((e) => {
+        if (appsMeta) appsMeta.textContent = "Desktop sign-in failed — try again";
+        console.warn(e);
+      });
+    });
+  }
+  if (btnAppsFullscreen) btnAppsFullscreen.addEventListener("click", () => enterAppsFullscreen());
+  if (btnAppsExitFs) btnAppsExitFs.addEventListener("click", () => exitAppsFullscreen());
+  if (btnAppsExitFsFloat) btnAppsExitFsFloat.addEventListener("click", () => exitAppsFullscreen());
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && appsFrameWrap && appsFrameWrap.classList.contains("is-fullscreen")) {
+      exitAppsFullscreen();
+    }
+  });
+
+
   function openApp(id) {
     const app = appsCatalog.find((a) => a.id === id);
     activeAppId = id;
@@ -2254,6 +2449,7 @@ btnSplit.addEventListener("click", () => {
       appsFrameWrap.classList.add("hidden");
       appsEmpty.classList.remove("hidden");
       btnAppsOpen.disabled = true;
+      setAppsChromeForApp(null);
       return;
     }
     appsTitle.textContent = app.title || app.id;
@@ -2261,32 +2457,15 @@ btnSplit.addEventListener("click", () => {
     appsEmpty.classList.add("hidden");
     appsFrameWrap.classList.remove("hidden");
     btnAppsOpen.disabled = false;
+    setAppsChromeForApp(app);
 
-    // Desktop / Gmail-via-Desktop: after Nullink OTP session, auto-login Guacamole
-    const wantsDesktop =
-      app.id === "desktop" ||
-      app.id === "gmail" ||
-      app.id === "messages" ||
-      (app.embed_url || "").startsWith("/desktop");
-    if (wantsDesktop) {
-      appsMeta.textContent = app.id === "messages" ? "Connecting to VPS Chrome…" : "Signing into desktop…";
-      fetch("/api/desktop/launch", { credentials: "include" })
-        .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
-        .then(({ ok, d }) => {
-          if (!ok || !d.embedUrl) {
-            appsMeta.textContent = "Desktop auto-login failed — falling back";
-            appsFrame.src = app.embed_url;
-            return;
-          }
-          appsMeta.textContent = app.id === "messages"
-            ? "VPS Chrome · open messages.google.com/web and pair once"
-            : "Desktop (PIN session) · " + (d.username || "desk");
-          appsFrame.src = d.embedUrl;
-        })
-        .catch(() => {
-          appsMeta.textContent = "Desktop auto-login error — falling back";
-          appsFrame.src = app.embed_url;
-        });
+    // Desktop / Gmail-via-Desktop: auto sign-in via Guacamole token
+    if (isDesktopishApp(app)) {
+      setAppsChromeForApp(app);
+      launchDesktopSignedIn({ newTab: false }).catch(() => {
+        if (appsMeta) appsMeta.textContent = "Desktop auto-login failed — use Sign in / Fill login";
+        if (appsFrame) appsFrame.src = app.embed_url;
+      });
       return;
     }
 
@@ -2308,7 +2487,12 @@ btnSplit.addEventListener("click", () => {
   });
   btnAppsOpen.addEventListener("click", () => {
     const app = appsCatalog.find((a) => a.id === activeAppId);
-    if (app && app.embed_url) window.open(app.embed_url, "_blank", "noopener");
+    if (!app || !app.embed_url) return;
+    if (isDesktopishApp(app)) {
+      launchDesktopSignedIn({ newTab: true }).catch(() => window.open(app.embed_url, "_blank", "noopener"));
+      return;
+    }
+    window.open(app.embed_url, "_blank", "noopener");
   });
 
   // ---- Chat helpers (existing) ----
@@ -2357,6 +2541,109 @@ btnSplit.addEventListener("click", () => {
     });
   }
 
+  // ---- Replit room artifacts (links, images, files, confirm cards) ----
+  const replitResolved = new Set();
+  function safeHttps(u) { return /^https:\/\/[^\s]+$/i.test(String(u || "")) ? String(u) : null; }
+  function renderReplitArtifacts(a) {
+    const box = document.createElement("div");
+    box.className = "rp-artifacts";
+    (a.links || []).forEach((l) => {
+      const u = safeHttps(l.url); if (!u) return;
+      const c = document.createElement("a");
+      c.className = "rp-card rp-link"; c.href = u; c.target = "_blank"; c.rel = "noopener noreferrer";
+      const t = document.createElement("span"); t.className = "rp-title"; t.textContent = l.title || u;
+      const h = document.createElement("span"); h.className = "rp-sub"; h.textContent = u.replace(/^https:\/\//, "");
+      c.append(t, h); box.appendChild(c);
+    });
+    (a.images || []).forEach((f) => {
+      if (!f || !f.id) return;
+      const img = document.createElement("img");
+      img.className = "rp-img"; img.loading = "lazy"; img.alt = f.name || "image";
+      img.src = `/api/files/${encodeURIComponent(f.id)}/download`;
+      box.appendChild(img);
+    });
+    (a.files || []).forEach((f) => {
+      if (!f || !f.id) return;
+      const c = document.createElement("a");
+      c.className = "rp-card rp-file"; c.href = `/api/files/${encodeURIComponent(f.id)}/download`;
+      const t = document.createElement("span"); t.className = "rp-title"; t.textContent = "📄 " + (f.name || "file");
+      const h = document.createElement("span"); h.className = "rp-sub";
+      h.textContent = (f.summary || "") + (f.size ? ` · ${Math.max(1, Math.round(f.size / 1024))} KB` : "") + " · in Files";
+      c.append(t, h); box.appendChild(c);
+    });
+    if (a.confirm && a.confirm.token) {
+      const tok = a.confirm.token;
+      const c = document.createElement("div"); c.className = "rp-card rp-confirm"; c.dataset.token = tok;
+      const t = document.createElement("span"); t.className = "rp-sub"; c.appendChild(t);
+      const row = document.createElement("div"); row.className = "rp-actions";
+      const ok = document.createElement("button"); ok.type = "button"; ok.className = "primary small"; ok.textContent = "Confirm";
+      const no = document.createElement("button"); no.type = "button"; no.className = "ghost small"; no.textContent = "Cancel";
+      row.append(ok, no); c.appendChild(row);
+      const exp = Number(a.confirm.expires || 0) * 1000;
+      const done = (label) => { ok.disabled = no.disabled = true; row.classList.add("rp-done"); t.textContent = label; };
+      const tick = () => {
+        if (!c.isConnected) return;
+        if (replitResolved.has(tok)) return done("Handled.");
+        const left = Math.round((exp - Date.now()) / 1000);
+        if (left <= 0) return done("Expired.");
+        t.textContent = `Spends Replit credits · expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+        setTimeout(tick, 1000);
+      };
+      setTimeout(tick, 0);
+      const send = async (verb) => {
+        done(verb === "confirm" ? "Confirmed. Sending to Replit…" : "Cancelling…");
+        try {
+          await fetch("/api/messages", { method: "POST", credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: `/${verb} ${tok}`, session_id: "replit" }) });
+          fetchMessages(true);
+        } catch { /* ignore */ }
+      };
+      ok.onclick = () => send("confirm"); no.onclick = () => send("cancel");
+      box.appendChild(c);
+    }
+    return box.childNodes.length ? box : null;
+  }
+
+  // ---- Replit room status line (current app + working indicator) ----
+  let replitStatusTimer = null;
+  function replitStatusEl() {
+    let el = document.getElementById("replit-status");
+    if (!el && chatTitle && chatTitle.parentElement) {
+      el = document.createElement("div"); el.id = "replit-status"; el.className = "replit-status hidden";
+      chatTitle.parentElement.insertAdjacentElement("afterend", el);
+    }
+    return el;
+  }
+  async function pollReplitStatus() {
+    const el = replitStatusEl(); if (!el) return;
+    if (activeSession !== "replit") { el.classList.add("hidden"); replitStatusTimer = null; return; }
+    try {
+      const r = await fetch("/api/replit/status", { credentials: "include" });
+      renderReplitStatus(await r.json());
+    } catch { el.textContent = "Replit bridge unreachable"; }
+    replitStatusTimer = setTimeout(pollReplitStatus, activeSession === "replit" ? (rtJoined === "replit" ? 15000 : 2500) : 0);
+  }
+  function renderReplitStatus(d) {
+    const el = replitStatusEl(); if (!el || activeSession !== "replit") return;
+    if (d && d.bridge_down) { el.classList.remove("hidden"); el.textContent = "Replit bridge unreachable"; return; }
+    {
+      el.classList.remove("hidden"); el.textContent = "";
+      const app = document.createElement("span");
+      app.textContent = d.connected === false ? "Replit not connected" : "App: " + ((d.app && d.app.title) || "none, use /apps then /app <name>");
+      el.appendChild(app);
+      const adv = document.createElement("a"); adv.href = "/replit/"; adv.target = "_blank"; adv.rel = "noopener";
+      adv.className = "replit-adv"; adv.textContent = "Advanced tools ↗"; el.appendChild(adv);
+      if (d.working && d.working.label) {
+        const w = document.createElement("span"); w.className = "replit-working";
+        w.innerHTML = '<span class="rp-dots"><i></i><i></i><i></i></span>';
+        w.appendChild(document.createTextNode(" " + d.working.label)); el.appendChild(w);
+        if (rtJoined !== "replit") fetchMessages(false);
+      }
+    }
+  }
+  function syncReplitStatus() { if (activeSession === "replit" && !replitStatusTimer) pollReplitStatus(); else if (activeSession !== "replit") { const el = replitStatusEl(); if (el) el.classList.add("hidden"); } }
+
   function appendBubble(msg) {
     if (messagesEl.querySelector(`.bubble-row[data-id="${msg.id}"]`)) return;
     const row = document.createElement("div");
@@ -2368,9 +2655,14 @@ btnSplit.addEventListener("click", () => {
     bubble.innerHTML = highlightText(msg.text || "", searchQuery.trim());
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = formatTs(msg.ts);
+    meta.textContent = (msg.from && msg.role !== "user" ? msg.from + " · " : "") + formatTs(msg.ts);
     const wrap = document.createElement("div");
     wrap.appendChild(bubble);
+    if (msg.replit) {
+      const art = renderReplitArtifacts(msg.replit);
+      if (art) wrap.appendChild(art);
+      if (msg.replit.resolved) replitResolved.add(msg.replit.resolved);
+    }
     wrap.appendChild(meta);
     row.appendChild(wrap);
     messagesEl.appendChild(row);
@@ -2493,6 +2785,19 @@ btnSplit.addEventListener("click", () => {
   let vaultItems = [];
   let activeVaultId = null;
   let vaultDirty = false;
+  let vaultLocked = false; // 2026-10-19: encrypted bodies; unlock = authenticator step-up (10 min)
+  async function vaultUnlock() {
+    const code = (window.prompt("Authenticator code (unlocks Vault contents for 10 minutes)") || "").replace(/\s+/g, "");
+    if (!code) return false;
+    try {
+      const r = await fetch("/api/ssh/stepup", { method: "POST", credentials: "include",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.ok) { showToast("Vault unlocked for 10 minutes"); return true; }
+      showToast(d.message || d.error || "Code not accepted");
+    } catch (_) { showToast("Network error"); }
+    return false;
+  }
 
   function showToast(msg, ms) {
     if (!toastEl) {
@@ -2764,12 +3069,21 @@ btnSplit.addEventListener("click", () => {
     vaultEditorWrap.classList.remove("hidden");
     if (vaultTitleInput) vaultTitleInput.value = item.title || "";
     if (vaultTagsInput) vaultTagsInput.value = (item.tags || []).join(", ");
-    if (vaultBodyInput) vaultBodyInput.value = item.body || "";
+    vaultLocked = !!item.locked;
+    if (vaultBodyInput) {
+      vaultBodyInput.value = item.body || "";
+      vaultBodyInput.readOnly = vaultLocked;
+      vaultBodyInput.title = vaultLocked ? "Locked: tap to unlock with your authenticator code" : "";
+      vaultBodyInput.onclick = vaultLocked ? async () => {
+        if (await vaultUnlock() && activeVaultId) openVaultItem(activeVaultId);
+      } : null;
+    }
     if (vaultSaveBtn) vaultSaveBtn.disabled = true;
     if (vaultDeleteBtn) vaultDeleteBtn.disabled = !item.id;
     vaultDirty = false;
     if (vaultMeta) {
-      vaultMeta.textContent = item.updated_at ? `Updated ${item.updated_at}` : (item.id ? `id ${item.id}` : "New");
+      vaultMeta.textContent = (item.updated_at ? `Updated ${item.updated_at}` : (item.id ? `id ${item.id}` : "New"))
+        + (vaultLocked ? " · 🔒 encrypted: tap the text to unlock" : (item.id ? " · 🔓 unlocked" : ""));
     }
   }
 
@@ -2849,7 +3163,7 @@ btnSplit.addEventListener("click", () => {
         method: isUpdate ? "PATCH" : "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: title || body.slice(0, 60), body, tags }),
+        body: JSON.stringify(vaultLocked && isUpdate ? { title: title || "Untitled", tags } : { title: title || body.slice(0, 60), body, tags }),
       });
       if (r.status === 401) return showAuth();
       const d = await r.json();

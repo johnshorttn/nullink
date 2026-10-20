@@ -1,0 +1,36 @@
+# Nullmail Gmail release — 12 October 2026
+
+Deployed successfully at https://nullmail.nullverse.cloud and https://nullmail.216.158.238.236.sslip.io. Local VPS mail remains primary; Cases remain separate durable entities. Gmail application integration is shipped, **but no live Google account is connected or tested**. No real message was sent or production mail mutated for tests. No Android APK was built.
+
+## Shipped
+
+Authenticated owner OAuth connect/callback with one-use session-bound state, S256 PKCE and encrypted server-held credentials; verified Google primary identity; explicit bounded import, stable provider/account/native-message namespace, pagination/checkpoints/dedup, persisted backoff and explicit reimport on expired history. Cached mail uses the existing reader/search/attachments, account visibility, reply/compose/send permissions and durable send idempotency/audit. New cached inbox mail runs server-side rules; historical imports do not automatically run rules. Cross-provider Cases and add-to-existing-case rules use the provider-aware reference and retain authorization checks across every member/detail/note/history path. Mobile/desktop setup and account UI, supported semantics, v1.2 API contract and future Android parity documentation are updated.
+
+Gmail labels, read flags, folders, priority, rule effects and Cases are **local-only**; observed Google label IDs do not imply writeback. Primary Google From only; send-as aliases, provider label/folder/read writeback, push notifications, native Android auth handoff/APK and account removal/revocation UI remain future work. Imported Gmail Sent messages are available through the messages API; web Sent continues to show submission audit. The bounded polling worker shares the mutation lock; slow Google requests can delay app writes. See `NULLMAIL-GMAIL.md` for limits and precise semantics.
+
+## Exact external blockers
+
+- `/etc/nullmail/google-oauth.json` is absent. Owner must register a Google Web OAuth client, enable Gmail API, configure consent/audience/test users and the exact primary callback `https://nullmail.nullverse.cloud/api/v1/gmail/callback`, and grant openid/email, gmail.readonly and gmail.send. Current consent availability cannot be established without that client.
+- `/etc/nullmail/google-token.key` is absent. Owner must install a generated Fernet key, root:nullmail 0640, retained in a private key backup. Tokens are encrypted in the restricted workspace database, not stored in the browser.
+- The service still denies non-loopback networking. An administrator-reviewed loopback HTTPS CONNECT proxy restricted to `oauth2.googleapis.com:443`, `openidconnect.googleapis.com:443`, and `gmail.googleapis.com:443` must be provisioned/configured before setting `egress_ready:true`. No proxy, broad egress exception, credential collection, network bypass or service-hardening removal was performed.
+
+Detailed owner steps and primary Google references are in [NULLMAIL-GMAIL.md](NULLMAIL-GMAIL.md). Setup and authenticated capabilities accurately show these blockers and zero connected accounts. Sending/live sync is not claimed verified.
+
+## Evidence
+
+- Initial inspection: source/runtime matched the preserved Cases release; both HTTPS `/health` endpoints returned 200 before changes. Existing numerous unrelated dirty files were retained.
+- Affected backend regression suite: **67 tests passed**. After final integration fixes, **13 Gmail fixture tests passed**, including HTTP auth/CSRF, callback replay/session binding, ciphertext storage, stable IDs, cross-account isolation, None visibility, safe reply identity, send idempotency and actor audit, page failure/replay dedup, backoff/history expiry, historical zero-run behavior, preview zero writes, folder moves, and cross-provider Case/rule integration. These counts overlap and are not 80 distinct tests.
+- Browser: final desktop 1440×1000 and mobile 412×915 fixture pass covered local-first sidebar, None and single-account views, independent verified Gmail From / Send via Gmail, Gmail Case creation, setup controls/semantics and no horizontal overflow. All browser traffic was intercepted to a loopback fixture; no Google/SMTP traffic. The first browser attempt needed its test to expand the intentionally collapsed External group. A new initialization test found and verified the fix for the combined cache's baseline files/key interface.
+- Python compilation and JavaScript syntax checks passed. Service Python has `cryptography` available.
+- Deployment: app-only restart; loopback and both public HTTPS health checks passed. Authenticated release checks passed on both hosts: protected endpoints, capabilities/accounts/Gmail status, Cases/rules/labels, static assets and invalid-CSRF rejection. Temporary verification session revoked; existing active owner sessions preserved.
+- Post-deploy SQLite integrity: `ok`; Gmail account/cache counts both zero. Preserved mail/config file hashes unchanged. Cases, memberships, notes, rules, run history and send audit identical to checkpoint. `IPAddressDeny=any`, loopback allowlist and AF_INET/AF_UNIX restriction remain intact. Mail transport, DNS, auth service and unrelated services were not restarted or reconfigured.
+
+## Source, checkpoints and rollback
+
+Source commit: `d1e9690cd35b1d49fd55d070570ee024dd7a2973`, parent preserved Cases report commit `b6dc928ac3b95c9714a16cad7c847318fcabdb12`. Local preservation branch: `nullmail-gmail-20261012`. Source was committed using an isolated Git index; real HEAD/index and unrelated dirty work were retained. No push/publication occurred. Report preservation commit is recorded on that branch separately.
+
+Pre-change private checkpoint: `/root/nullmail-build-backup/gmail-20261012T211045Z` (pointer `gmail-latest`), including source, runtime, restricted config, consistent SQLite backups and preserved mail/config hashes. Existing earlier backups were retained. Deployment checkpoint: `/root/nullmail-build-backup/gmail-deploy-20261012T212137Z` (pointer `gmail-deploy-latest`), including consistent SQLite backups, pre-deploy runtime/source/Maildir and release hash manifest. Previous runtime: `/usr/local/lib/nullmail-before-20261012T212137Z`. Test logs/source hashes are retained in the pre-change checkpoint; fixture screenshots are `/root/nullmail-build-backup/gmail-{desktop,mobile}-fixture.png`.
+
+Migration is additive: Gmail accounts/messages/skipped records and OAuth-state tables in `workspace.sqlite3`; private Gmail cache directories under `/var/lib/nullmail/app`. Existing message/draft/Case schemas and mail paths were not replaced.
+
+Rollback app code only: first compare current runtime hashes with `release.json` in the deployment checkpoint; refuse blind replacement if there are concurrent changes. Stop only `nullmail`, move current runtime aside, restore the preserved previous runtime to `/usr/local/lib/nullmail`, start only `nullmail`, then verify health. Do **not** restore old databases/Maildir over newer mail or user changes. Additive Gmail tables/cache can remain inert under previous code. If future imports have occurred, preserve their state/cache separately before any data repair. The deployment helper already performs this guarded app-only rollback if installation health fails; it was not needed for this release.

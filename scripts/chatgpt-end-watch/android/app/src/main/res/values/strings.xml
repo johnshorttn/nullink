@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ChatGPT End Watch</string>
+    <string name="overlay_channel">End Watch Overlay</string>
+    <string name="start">Start</string>
+    <string name="stop">Stop</string>
+    <string name="grant_overlay">Grant overlay permission</string>
+    <string name="open_overlay">Show floating Start/Stop</string>
+    <string name="overlay_notification">Floating Start/Stop active</string>
+</resources>
