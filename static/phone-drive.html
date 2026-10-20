@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <title>Phone Drive · Nullink</title>
+  <style>
+    :root { color-scheme: dark; font: 15px/1.5 system-ui, sans-serif; --bg:#10131c; --panel:#191e2b; --line:#30384a; --text:#eef2fb; --muted:#aab5c8; --accent:#8b7cf7; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); }
+    header { position:sticky; top:0; z-index:1; padding:14px 18px; background:#10131cee; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
+    h1 { font-size:1.05rem; margin:0 auto 0 0; } main { max-width:900px; margin:0 auto; padding:16px; display:grid; gap:14px; }
+    section { border:1px solid var(--line); border-radius:14px; background:var(--panel); padding:14px; }
+    h2 { font-size:.96rem; margin:0 0 10px; } p { margin:6px 0; } .muted { color:var(--muted); font-size:.88rem; }
+    button { color:var(--text); background:#242b3b; border:1px solid var(--line); border-radius:9px; padding:9px 12px; cursor:pointer; }
+    button.primary { background:var(--accent); color:#100e20; border-color:transparent; font-weight:650; } button.danger { color:#ffb9b9; }
+    button:disabled { opacity:.55; cursor:wait; } .row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+    .devices,.items { display:grid; gap:8px; } .device,.item { border:1px solid var(--line); border-radius:10px; padding:10px; display:flex; gap:10px; align-items:center; }
+    .device-main,.item-main { flex:1; min-width:0; } .name { font-weight:600; overflow-wrap:anywhere; } .badge { font-size:.74rem; color:var(--muted); }
+    .roots { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; } .root { padding:6px 9px; font-size:.85rem; }
+    .code { font:700 1.35rem/1.4 ui-monospace,monospace; letter-spacing:.06em; color:#c5bcff; overflow-wrap:anywhere; }
+    .crumbs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:9px; } .crumb { padding:5px 8px; font-size:.82rem; }
+    .status { min-height:1.4em; color:var(--muted); } .empty { padding:16px; text-align:center; color:var(--muted); }
+    @media(max-width:520px) { header{padding:12px;} main{padding:10px;} .device,.item{align-items:flex-start;} .device>.danger{padding:7px;} }
+  </style>
+</head>
+<body>
+  <header><h1>Phone Drive</h1><button id="refresh">Refresh</button></header>
+  <main>
+    <section>
+      <h2>Connect your Pixel</h2>
+      <p class="muted">Generate a six-digit one-time pairing code here, then enter it in the Nullink Phone companion app. The code expires in two minutes.</p>
+      <div class="row"><button id="pair-code" class="primary">Generate pairing code</button><span id="pair-result" aria-live="polite"></span></div>
+    </section>
+    <section>
+      <h2>Paired phones</h2>
+      <div id="devices" class="devices"><div class="empty">Loading devices…</div></div>
+    </section>
+    <section>
+      <h2>Live phone screen</h2>
+      <p class="muted">Click or tap the live image to tap your phone; drag to swipe. Enable Accessibility and allow remote control for this session in the phone app. Locked screens and protected dialogs are unsupported. Start screen mirroring in Nullink Phone and approve Android’s screen-capture prompt. Keep the phone display awake while viewing.</p>
+      <div class="row"><button id="stop-screen" class="danger" disabled>Stop viewing</button><span id="screen-status" class="status" role="status">Choose View screen on an online phone.</span></div>
+      <div class="row" style="margin-top:10px" id="control-buttons">
+        <button data-control="back" disabled>Back</button><button data-control="home" disabled>Home</button><button data-control="recents" disabled>Recents</button>
+        <span id="control-status" role="status">Control off · select a phone.</span>
+      </div>
+      <div style="margin-top:10px;background:#090b10;border-radius:10px;min-height:180px;display:grid;place-items:center;overflow:auto">
+        <img id="screen-frame" alt="Live phone screen: tap or drag to control the selected phone" draggable="false" style="display:none;max-width:100%;max-height:75vh;object-fit:contain;touch-action:none;user-select:none" />
+        <span id="screen-placeholder" class="empty">No screen selected.</span>
+      </div>
+    </section>
+    <section>
+      <h2>Browse shared folders</h2>
+      <p class="muted">Select a file to download it into this Chrome session. Then attach it from Chrome’s Downloads folder in Google Messages. Files are read from the phone only when requested and staged temporarily.</p>
+      <div id="browser-status" class="status" role="status">Choose an online phone and a shared folder.</div>
+      <div id="crumbs" class="crumbs"></div>
+      <div id="items" class="items"><div class="empty">No folder selected.</div></div>
+    </section>
+  </main>
+  <script src="/phone-drive.js"></script>
+</body>
+</html>

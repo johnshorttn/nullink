@@ -1,0 +1,13 @@
+{
+  "state_dir": "/var/lib/nullink-master",
+  "socket": "/run/nullink-master/worker.sock",
+  "codex_bin": "/usr/local/bin/codex",
+  "sandbox": "workspace-write",
+  "timeout_seconds": 1800,
+  "max_output_bytes": 2097152,
+  "projects": {
+    "nullink": "/opt/nullink",
+    "storycast": "/opt/storycast-app"
+  },
+  "services": ["nullink.service", "nullink-mcp.service", "storycast-app.service", "caddy.service"]
+}

@@ -40,7 +40,9 @@ def handle_message(message: Any) -> dict[str, Any] | None:
     request_id = message.get("id")
     is_notification = "id" not in message
     method = message.get("method")
-    params = message.get("params") or {}
+    params = message.get("params", {})
+    if not isinstance(params, dict):
+        return None if is_notification else jsonrpc_error(request_id, -32602, "Invalid params")
 
     if message.get("jsonrpc") != "2.0" or not isinstance(method, str):
         return None if is_notification else jsonrpc_error(request_id, -32600, "Invalid Request")
@@ -196,3 +198,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

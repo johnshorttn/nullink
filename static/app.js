@@ -623,6 +623,21 @@
         if (desk) openApp(desk.id);
         else if (appsCatalog && appsCatalog[0]) openApp(appsCatalog[0].id);
       });
+    } else if (tool === "messages") {
+      goMode("apps");
+      loadApps().then(() => {
+        const messages = (appsCatalog || []).find((a) => a.id === "messages");
+        if (messages) openApp(messages.id);
+        else {
+          if (appsTitle) appsTitle.textContent = "Google Messages";
+          if (appsMeta) appsMeta.textContent = "VPS Desktop is not configured in the Nullink app list.";
+          if (appsFrameWrap) appsFrameWrap.classList.add("hidden");
+          if (appsEmpty) {
+            appsEmpty.classList.remove("hidden");
+            appsEmpty.querySelector("p").textContent = "Add the allowlisted VPS Desktop app to enable Google Messages.";
+          }
+        }
+      });
     } else if (tool === "phone-drive") {
       goMode("apps");
       activeAppId = null;
@@ -945,7 +960,7 @@
     syncBottomNav();
   });
   if (btnSplit) {
-    
+
   if (btnChatMin) btnChatMin.addEventListener("click", toggleChatMinimized);
   if (btnChatMinHdr) btnChatMinHdr.addEventListener("click", toggleChatMinimized);
   if (chatRestoreBar) chatRestoreBar.addEventListener("click", () => setChatMinimized(false));
@@ -2359,7 +2374,7 @@ btnSplit.addEventListener("click", () => {
   function isDesktopishApp(app) {
     if (!app) return false;
     const url = app.embed_url || app.url || "";
-    return app.id === "desktop" || app.id === "gmail" || String(url).startsWith("/desktop");
+    return app.id === "desktop" || app.id === "gmail" || app.id === "messages" || String(url).startsWith("/desktop");
   }
 
   function setAppsChromeForApp(app) {
