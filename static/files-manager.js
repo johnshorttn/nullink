@@ -77,6 +77,7 @@
   }
 
   function render() {
+    if (state.search) return renderSearch();
     renderCrumbs();
     renderTree(els.tree);
     renderTree(els.side);
@@ -192,6 +193,7 @@
           ["Open", () => openItem(f)],
           f.preview !== "none" ? ["Preview", () => preview(f)] : null,
           ["Download", () => download(f)],
+          ["Share link", () => shareDialog(f)],
           ["Rename", () => renameFile(f)],
           ["Move", () => moveDialog([f.id], [])],
           ["Delete", () => trashItems([f.id], []), "danger"],
@@ -474,6 +476,88 @@
     status("Preparing zip download…");
   }
 
+  // ---- search (name + text contents; Nullink Files drive only) ----
+  const sInput = $("fm-search");
+  async function runSearch(q) {
+    q = (q || "").trim();
+    if (!q) { state.search = null; return render(); }
+    try {
+      const d = await api(`/api/fm/search?q=${encodeURIComponent(q)}&contents=1`);
+      state.search = d;
+      render();
+    } catch (e) { status(e.message, true); }
+  }
+  function renderSearch() {
+    const d = state.search;
+    els.crumbs.innerHTML = "";
+    els.crumbs.appendChild(el("span", "fm-crumb fm-crumb--cur", `Search: “${d.q}”`));
+    const clr = el("button", "ghost tiny", "Clear"); clr.type = "button";
+    clr.addEventListener("click", () => { sInput.value = ""; state.search = null; render(); });
+    els.crumbs.appendChild(clr);
+    els.list.innerHTML = "";
+    els.selbar.hidden = true;
+    els.trashBar.hidden = true;
+    els.empty.hidden = d.results.length > 0;
+    els.empty.textContent = d.results.length ? "" : "No matches.";
+    d.results.forEach((r) => {
+      const li = el("li", "fm-row fm-row--search");
+      const isF = r.type === "folder";
+      const name = el("button", "fm-row__name", (isF ? "📁 " : "📄 ") + (isF ? r.folder.split("/").pop() : r.name));
+      name.type = "button";
+      name.addEventListener("click", () => {
+        state.search = null; sInput.value = "";
+        if (isF) go(r.folder); else { go(r.folder || ""); if (r.preview !== "none") preview(r); }
+      });
+      const where = el("span", "fm-row__meta", (isF ? r.folder : (r.folder || "Files")) + (r.match === "content" ? ` · line ${r.line}` : " · name"));
+      li.appendChild(name); li.appendChild(where);
+      if (r.snippet) li.appendChild(el("div", "fm-snippet", r.snippet));
+      els.list.appendChild(li);
+    });
+    if (d.truncated) status("Results truncated (size caps reached)");
+  }
+  $("fm-search-form").addEventListener("submit", (e) => { e.preventDefault(); runSearch(sInput.value); });
+  let sTimer = null;
+  sInput.addEventListener("input", () => { clearTimeout(sTimer); sTimer = setTimeout(() => runSearch(sInput.value), 350); });
+
+  // ---- share links (expiring, revocable; owner only) ----
+  async function shareDialog(f) {
+    const body = el("div", "fm-share");
+    body.appendChild(el("p", "hint", "Anyone with the link can download this file until it expires or you revoke it."));
+    const sel = el("select"); sel.id = "fm-share-ttl";
+    [["1h", "1 hour"], ["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"]].forEach(([v, t]) => { const o = el("option", null, t); o.value = v; if (v === "7d") o.selected = true; sel.appendChild(o); });
+    const mk = el("button", "accent-btn toolbar-btn", "Create link"); mk.type = "button";
+    const out = el("input"); out.readOnly = true; out.className = "fm-share-url"; out.placeholder = "New link appears here";
+    const list = el("ul", "fm-share-list");
+    const row1 = el("div", "fm-share-row"); row1.append(sel, mk);
+    body.append(row1, out, el("strong", null, "Links for this file"), list);
+    async function load() {
+      list.innerHTML = "";
+      const d = await api(`/api/fm/shares?file_id=${encodeURIComponent(f.id)}`);
+      if (!d.links.length) list.appendChild(el("li", "hint", "None yet."));
+      d.links.forEach((l) => {
+        const li = el("li", "fm-share-item");
+        const exp = new Date(l.expires_at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+        li.appendChild(el("span", null, `${l.id} · ${l.status} · expires ${exp} · ${l.opens || 0} opens`));
+        if (l.status === "active") {
+          const rv = el("button", "ghost tiny fm-danger", "Revoke"); rv.type = "button";
+          rv.addEventListener("click", async () => { try { await api(`/api/fm/shares/${l.id}/revoke`, { json: {} }); load(); } catch (e) { status(e.message, true); } });
+          li.appendChild(rv);
+        }
+        list.appendChild(li);
+      });
+    }
+    mk.addEventListener("click", async () => {
+      try {
+        const d = await api("/api/fm/shares", { json: { file_id: f.id, ttl: sel.value } });
+        out.value = d.url; out.select();
+        try { await navigator.clipboard.writeText(d.url); status("Link copied"); } catch (_) {}
+        load();
+      } catch (e) { status(e.message, true); }
+    });
+    load().catch((e) => status(e.message, true));
+    await dialog(`Share “${f.name}”`, body, [["Done", "ok"]]);
+  }
+
   // ---- drag & drop ----
   function dragItems(e, key) {
     const keys = state.sel.has(key) ? [...state.sel] : [key];
@@ -525,5 +609,5 @@
   document.addEventListener("nl:files-loaded", refresh);
 
   window.NLFiles = { refresh, go, state };
-  window.NLFiles = { go, rerender: () => render(), cwd: () => state.cwd };
+  window.NLFiles = { go, rerender: () => render(), cwd: () => state.cwd, search: runSearch, share: (id) => { const f = state.files.find((x) => x.id === id); if (f) shareDialog(f); } };
 })();

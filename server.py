@@ -3975,7 +3975,7 @@ class Handler(BaseHTTPRequestHandler):
                         "/api/portal/reports"},
                 "POST": {"/api/auth/verify", "/api/auth/logout"},
             }
-            if (path.startswith("/s/") or path.startswith("/a/") or path.startswith("/reports/") or path.startswith("/api/share/")
+            if (path.startswith("/s/") or path.startswith("/a/") or path.startswith("/f/") or path.startswith("/reports/") or path.startswith("/api/share/")
                     or path == "/share-links") and self.command in ("GET", "POST"):
                 return True
             if path not in permitted.get(self.command, set()) and not (
@@ -3989,6 +3989,12 @@ class Handler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if self.portal_host and share_links.handle(self, "GET", path, qs):
             return
+        m_f = re.match(r"^/f/([A-Za-z0-9_-]{1,80})$", path)
+        if m_f:
+            share_links.file_public(self, m_f.group(1))
+            return
+        if path.startswith("/f/"):
+            return self._json(404, {"error": "not_found"})
         if self._guest_gate("GET", path):
             return
         if path.startswith("/api/fm") and files_manager.handle(self, "GET", path, qs):

@@ -72,6 +72,8 @@ def link_status(l, now=None):
     now = now or _now()
     if l.get("revoked_at"):
         return "revoked"
+    if l.get("kind") == "file":
+        return "expired" if now >= l["expires_at"] else "active"
     if l.get("kind") == "ai":
         if now >= l["expires_at"]:
             return "expired"
@@ -126,6 +128,95 @@ def create_ai_link(report, by, ttl="24h", max_opens=AI_MAX_OPENS, host=None):
         save(d)
     audit("ai_link_created", link_id=lid, report=report, by=by, ttl=ttl, max_opens=max_opens)
     return lid, f"{base_url(host)}/a/{token}"
+
+
+# ---- Files-manager file links (2026-10-21): owner-created, expiring, revocable download links
+# for Nullink Files drive entries only (never the Server drive, never secrets/). Public URL /f/<token>.
+FILE_TTLS = {"1h": 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
+
+
+def create_file_link(file_id, name, by, ttl="7d", host=None):
+    secs = FILE_TTLS[ttl]
+    token = secrets.token_urlsafe(32)
+    lid = _rid("SF")
+    now = _now()
+    with _lock:
+        d = load()
+        d["links"][lid] = {"id": lid, "kind": "file", "token_sha": _th(token), "file_id": file_id,
+                           "report": "file:" + str(name)[:120], "created_at": now, "created_by": by,
+                           "expires_at": now + secs, "ttl": ttl, "opens": 0, "extensions": 0,
+                           "revoked_at": None, "first_open_at": None, "parent": None,
+                           "for_name": None, "for_email": None, "ip": None, "ua": None}
+        save(d)
+    audit("file_link_created", link_id=lid, file_id=file_id, by=by, ttl=ttl)
+    h = host if host in ("nullink.nullverse.cloud", "nullink.216.158.238.236.sslip.io") else "nullink.nullverse.cloud"
+    return lid, f"https://{h}/f/{token}"
+
+
+def file_links(file_id=None):
+    now = _now()
+    out = []
+    for l in sorted(load()["links"].values(), key=lambda x: -x["created_at"]):
+        if l.get("kind") != "file" or (file_id and l.get("file_id") != file_id):
+            continue
+        out.append({k: l.get(k) for k in ("id", "file_id", "ttl", "opens", "created_at", "expires_at",
+                                          "revoked_at", "first_open_at")} | {"status": link_status(l, now)})
+    return out
+
+
+def revoke_file_link(lid, by):
+    l = load()["links"].get(lid)
+    if not l or l.get("kind") != "file":
+        return False
+    return revoke_link(lid, by)
+
+
+def file_public(h, token):
+    """GET /f/<token>: forced-download of the shared Files entry while the link is active."""
+    l = find_by_token(token, kind="file")
+    ip = S.client_ip(h)
+    if not l:
+        audit("file_open_rejected_unknown", ip=ip)
+        h._json(404, {"error": "not_found"}); return True
+    st = link_status(l)
+    if st != "active":
+        audit("file_open_rejected", link_id=l["id"], status=st, ip=ip)
+        h._json(410, {"error": st}); return True
+    import files_manager
+    entry = next((e for e in S.load_files() if isinstance(e, dict) and e.get("id") == l.get("file_id")), None)
+    p = files_manager.safe_entry_path(entry) if entry and not entry.get("trashed_at") else None
+    if p is not None:
+        try:
+            p.resolve().relative_to((S.BASE / "secrets").resolve())
+            p = None
+        except ValueError:
+            pass
+    if p is None:
+        audit("file_open_rejected", link_id=l["id"], status="missing", ip=ip)
+        h._json(410, {"error": "unavailable"}); return True
+    with _lock:
+        d = load(); rec = d["links"].get(l["id"])
+        if rec:
+            rec["opens"] = rec.get("opens", 0) + 1
+            rec["first_open_at"] = rec.get("first_open_at") or _now()
+            save(d)
+    audit("file_link_opened", link_id=l["id"], ip=ip)
+    size = p.stat().st_size
+    h.send_response(200)
+    for k, v in (("Content-Type", "application/octet-stream"), ("Content-Length", str(size)),
+                 ("Content-Disposition", f'attachment; filename="{S.slugify(entry.get("name") or p.name)}"'),
+                 ("X-Content-Type-Options", "nosniff"), ("Cache-Control", "no-store"),
+                 ("Content-Security-Policy", "default-src 'none'; sandbox"), ("Referrer-Policy", "no-referrer"),
+                 ("X-Robots-Tag", "noindex")):
+        h.send_header(k, v)
+    h.end_headers()
+    try:
+        with open(p, "rb") as f:
+            import shutil
+            shutil.copyfileobj(f, h.wfile, 1024 * 1024)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    return True
 
 
 def find_by_token(token, kind="person"):
