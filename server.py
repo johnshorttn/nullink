@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys as _sys
 import share_links
+import files_manager
 import ai_rooms
 
 from phone_bridge import PhoneBridgeError, get_bridge
@@ -1457,7 +1458,7 @@ GUEST_OWNER_ONLY_PREFIXES = (
 GUEST_READ_ALLOWED_WRITES = ("/api/auth/logout",)
 # John 2026-10-14: guests see the app shell only, not chat history / files / notes.
 GUEST_HIDE_HISTORY = True
-GUEST_HISTORY_PREFIXES = ("/api/messages", "/api/files", "/api/inbox", "/api/session-memory",
+GUEST_HISTORY_PREFIXES = ("/api/messages", "/api/files", "/api/fm", "/api/inbox", "/api/session-memory",
                           "/api/playground", "/api/tasks", "/uploads", "/api/replit")
 
 
@@ -2856,9 +2857,8 @@ def safe_rel_under(base: Path, rel: str) -> Path | None:
 
 
 def resolve_file_path(entry: dict) -> Path | None:
-    rel = entry.get("path") or ""
-    p = safe_rel_under(BASE, rel)
-    return p if p and p.is_file() else None
+    """Regular file under BASE (safe_rel_under); symlinks anywhere in the path are refused."""
+    return files_manager.safe_entry_path(entry)
 
 
 def is_text_file(name: str) -> bool:
@@ -3984,6 +3984,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._guest_gate("GET", path):
             return
+        if path.startswith("/api/fm") and files_manager.handle(self, "GET", path, qs):
+            return
         if path == "/api/guest/requests":
             return self._guest_owner_list()
         if path == "/api/guest/audit":
@@ -4068,6 +4070,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("index.html", "text/html; charset=utf-8")
         if path == "/app.js":
             return self._serve_static("app.js", "application/javascript; charset=utf-8")
+        if path == "/files-manager.js":
+            return self._serve_static("files-manager.js", "application/javascript; charset=utf-8")
         if path == "/vendor/socket.io.min.js":
             return self._serve_static("vendor/socket.io.min.js", "application/javascript; charset=utf-8")
         if path == "/phone-drive.js":
@@ -4265,6 +4269,8 @@ class Handler(BaseHTTPRequestHandler):
             if not self._require_auth():
                 return
             files = load_files()
+            if (qs.get("trash") or [""])[0] != "1":
+                files = [f for f in files if not f.get("trashed_at")]
             label = (qs.get("label") or [None])[0]
             if label:
                 files = [f for f in files if label in (f.get("labels") or [])]
@@ -4471,6 +4477,9 @@ class Handler(BaseHTTPRequestHandler):
                 self, "POST", path, urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)):
             return
         if self._guest_gate("POST", path):
+            return
+        if path.startswith("/api/fm") and files_manager.handle(
+                self, "POST", path, urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)):
             return
         if path == "/api/guest/request":
             return self._guest_request_create()
@@ -5227,6 +5236,8 @@ class Handler(BaseHTTPRequestHandler):
         disp = f'attachment; filename="{slugify(name)}"'
         self._send(200, data, "application/octet-stream", [
             ("Content-Disposition", disp),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Content-Security-Policy", "default-src 'none'; sandbox"),
         ])
 
     def _file_update_meta(self, fid: str) -> None:
@@ -5246,24 +5257,22 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, {"ok": True, "file": entry})
 
     def _file_delete(self, fid: str) -> None:
-        if not self._require_auth():
+        """Legacy alias (Files manager S1): DELETE /api/files/<id> moves the entry to Trash.
+        Needs step-up like /api/fm/trash; files are only removed from disk by empty-trash."""
+        if self._guest_gate("DELETE", "/api/fm/trash"):
+            return
+        if self.headers.get("Authorization") is not None:
+            return self._json(403, {"error": "forbidden", "message": "owner cookie session required"})
+        if self._require_owner() is None or not self._require_stepup():
             return
         files = load_files()
         entry = next((f for f in files if f["id"] == fid), None)
         if not entry:
             return self._json(404, {"error": "not_found"})
-        fp = resolve_file_path(entry)
-        files = [f for f in files if f["id"] != fid]
-        save_files(files)
-        # only delete if under uploads/ or data/files/ or scratch/
-        if fp:
-            try:
-                rel = str(fp.relative_to(BASE.resolve()))
-                if rel.startswith(("uploads/", "data/files/", "scratch/", "playground/")):
-                    fp.unlink(missing_ok=True)
-            except (ValueError, OSError):
-                pass
-        return self._json(200, {"ok": True})
+        if not entry.get("trashed_at"):
+            entry["trashed_at"] = iso_now()
+            save_files(files)
+        return self._json(200, {"ok": True, "trashed": True})
 
     def _file_save(self) -> None:
         if not self._require_auth():
@@ -5415,6 +5424,9 @@ class Handler(BaseHTTPRequestHandler):
                 "size": len(data),
                 "updated_at": iso_now(),
                 "source": "upload",
+                "folder": getattr(self, "_fm_upload_folder", None) or "",
+                "trashed_at": None,
+                "fm": files_manager.FM_VERSION,
             }
             saved.append(entry)
 
@@ -6557,6 +6569,10 @@ def main() -> None:
         ensure_chatgpt_playground_label()
     except Exception as exc:
         print(f"ensure_chatgpt_playground_label: {exc}", flush=True)
+    try:
+        print(f"files_manager.migrate: {files_manager.migrate()}", flush=True)
+    except Exception as exc:
+        print(f"files_manager.migrate: {exc}", flush=True)
     if MESSAGES_FILE.stat().st_size == 0:
         append_message(
             "assistant",
@@ -6570,6 +6586,7 @@ def main() -> None:
 
 
 share_links.bind(_sys.modules[__name__])
+files_manager.bind(_sys.modules[__name__])
 
 if __name__ == "__main__":
     main()

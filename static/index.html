@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Nullink</title>
   <link rel="stylesheet" href="/tokens.css?v=fluid4c" />
-  <link rel="stylesheet" href="/style.css?v=fluid4c-mail1-rp3" />
+  <link rel="stylesheet" href="/style.css?v=fluid4c-mail1-rp3-fm1" />
 </head>
 <body>
   <div id="app">
@@ -104,7 +104,8 @@
               <input type="file" id="upload-input" multiple hidden />
             </label>
           </div>
-          <ul id="file-list" class="file-list"></ul>
+          <ul id="file-list" class="file-list fm-legacy-list" hidden></ul>
+          <nav id="fm-side-tree" class="fm-tree fm-tree--side" aria-label="Folders"></nav>
         </div>
 
         <div id="chat-sidebar" class="sidebar-section">
@@ -269,6 +270,46 @@
 
         <!-- Files / editor panel -->
         <div id="panel-files" class="panel hidden">
+          <section id="fm" class="fm" aria-label="File manager">
+            <header class="fm-bar">
+              <nav id="fm-crumbs" class="fm-crumbs" aria-label="Current folder"></nav>
+              <div class="fm-actions">
+                <label class="ghost toolbar-btn fm-upload" title="Upload files">Upload<input type="file" id="fm-upload-input" multiple hidden /></label>
+                <button type="button" id="fm-new-folder" class="ghost toolbar-btn">New folder</button>
+                <button type="button" id="fm-new-file" class="ghost toolbar-btn">New file</button>
+                <button type="button" id="fm-trash-toggle" class="ghost toolbar-btn" aria-pressed="false">Trash</button>
+              </div>
+            </header>
+            <div id="fm-selbar" class="fm-selbar" hidden>
+              <span id="fm-selcount"></span>
+              <button type="button" class="ghost tiny" data-bulk="move">Move</button>
+              <button type="button" class="ghost tiny" data-bulk="trash">Delete</button>
+              <button type="button" class="ghost tiny" data-bulk="restore">Restore</button>
+              <button type="button" class="ghost tiny fm-danger" data-bulk="purge">Delete forever</button>
+              <button type="button" class="ghost tiny" data-bulk="clear">Clear</button>
+            </div>
+            <div class="fm-body">
+              <nav id="fm-tree" class="fm-tree fm-tree--main" aria-label="Folders"></nav>
+              <div id="fm-list-wrap" class="fm-list-wrap">
+                <div id="fm-trash-bar" class="fm-trash-bar" hidden>
+                  <span>Items in Trash stay on disk until you empty it.</span>
+                  <button type="button" id="fm-empty-trash" class="ghost tiny fm-danger">Empty trash</button>
+                </div>
+                <ul id="fm-list" class="fm-list" role="list"></ul>
+                <p id="fm-empty" class="hint fm-empty" hidden>This folder is empty. Drop files here or use Upload.</p>
+              </div>
+            </div>
+            <div id="fm-drop" class="fm-drop" hidden><span>Drop to upload</span></div>
+            <p id="fm-status" class="fm-status" role="status" aria-live="polite"></p>
+          </section>
+          <dialog id="fm-dialog" class="fm-dialog">
+            <form method="dialog" class="fm-dialog__inner">
+              <header class="fm-dialog__head"><strong id="fm-dialog-title"></strong>
+                <button type="submit" value="cancel" class="ghost tiny" aria-label="Close">✕</button></header>
+              <div id="fm-dialog-body" class="fm-dialog__body"></div>
+              <footer id="fm-dialog-foot" class="fm-dialog__foot"></footer>
+            </form>
+          </dialog>
           <header class="editor-header">
             <div class="editor-title-row">
               <h2 id="editor-filename">No file open</h2>
@@ -276,6 +317,7 @@
               <span id="editor-meta" class="muted-meta"></span>
             </div>
             <div class="editor-toolbar">
+              <button type="button" id="fm-back" class="ghost toolbar-btn">← Files</button>
               <button type="button" id="btn-save" class="ghost toolbar-btn" disabled>Save</button>
               <button type="button" id="btn-preview" class="ghost toolbar-btn" disabled>Preview</button>
               <button type="button" id="btn-ask" class="accent-btn toolbar-btn" disabled>Ask Morc</button>
@@ -547,8 +589,9 @@
 
   <div id="guest-banner" class="guest-banner hidden" role="status"></div>
   <script src="/vendor/socket.io.min.js?v=4.8.1"></script>
-  <script src="/app.js?v=sio1-ssh1-vault1"></script>
+  <script src="/app.js?v=sio1-ssh1-vault1-fm1"></script>
   <script src="/guest.js?v=g4"></script>
+  <script src="/files-manager.js?v=fm1"></script>
   <div id="apps-fs-chrome" class="apps-fs-chrome hidden"><button type="button" id="btn-apps-exit-fs-floating" class="accent-btn toolbar-btn">Exit full screen</button></div>
 </body>
 </html>
