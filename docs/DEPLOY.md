@@ -10,3 +10,4 @@ and automatically roll back if the health check fails.
 - Backups: `~morc/nullink-backups/` (files.json + code tarballs, mode 600).
 
 - 2026-10-21: hook verified after safe.directory fix (PR #17).
+- 2026-10-21: hook now uses fetch + merge --ff-only, refuses + alerts on local changes, rollback via reset --keep (PR #20).
