@@ -2665,3 +2665,8 @@ body.is-guest #guest-audit-btn { display: none !important; }
 }
 /* keep the chat Labels section from being squashed when the Vault sidebar grows */
 .sidebar-section:has(> #label-chips) { flex: 0 0 auto; }
+.gh-row .fm-row__check { flex: 0 0 auto; }
+.gh-row .gh-dl { flex: 0 0 auto; min-width: 36px; min-height: 32px; }
+@media (max-width: 600px) { .gh-row .gh-dl { min-width: 44px; min-height: 40px; } #gh-selbar .tiny { min-height: 40px; } }
+#gh .fm-row .fm-row__name { flex: 1 1 auto; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-viewer[hidden], #gh-list[hidden] { display: none; }

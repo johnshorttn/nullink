@@ -9,10 +9,10 @@ const root = $("gh");
 const NL = () => window.NL || {};
 const el = (t, c, x) => { const e = document.createElement(t); if (c) e.className = c; if (x != null) e.textContent = x; return e; };
 const enc = encodeURIComponent;
-const state = { repo: null, ref: null, path: "", file: null, editing: false, wrap: false, inited: false, branches: [] };
+const state = { repo: null, ref: null, path: "", file: null, editing: false, wrap: false, inited: false, branches: [], sel: new Set(), items: [] };
 const els = { crumbs: $("gh-crumbs"), list: $("gh-list"), viewer: $("gh-viewer"), cm: $("gh-cm"), name: $("gh-file-name"),
   edit: $("gh-edit"), save: $("gh-save"), cancel: $("gh-cancel"), find: $("gh-find"), wrapB: $("gh-wrap"),
-  status: $("gh-status"), branch: $("gh-branch"), mode: $("gh-mode"), unconf: $("gh-unconfigured"), banner: $("gh-banner"),
+  status: $("gh-status"), selbar: $("gh-selbar"), selcount: $("gh-selcount"), dl: $("gh-download"), branch: $("gh-branch"), mode: $("gh-mode"), unconf: $("gh-unconfigured"), banner: $("gh-banner"),
   dlg: $("fm-dialog"), dlgTitle: $("fm-dialog-title"), dlgBody: $("fm-dialog-body"), dlgFoot: $("fm-dialog-foot") };
 
 function status(m, err) { els.status.textContent = m || ""; els.status.classList.toggle("fm-status--err", !!err); }
@@ -73,6 +73,44 @@ function crumbs() {
   if (state.file) { sep(); els.crumbs.appendChild(el("span", "fm-crumb fm-crumb--cur", state.file.name)); }
   if (!state.file && window.NLFav) els.crumbs.appendChild(window.NLFav.star("github", `${state.repo}@${state.ref}:${state.path}`));
 }
+// ---- downloads (single file + multi-select zip; read-only, no code needed) ----
+function navDownload(url, msg) {
+  const a = document.createElement("a"); a.href = url; a.rel = "noopener";
+  document.body.appendChild(a); a.click(); a.remove();
+  status(msg);
+}
+function downloadFile(path) {
+  navDownload(`/api/gh/download?repo=${enc(state.repo)}&ref=${enc(state.ref)}&path=${enc(path)}`, "Downloading " + path.split("/").pop() + "…");
+}
+async function downloadZip(paths) {
+  const url = `/api/gh/zip?repo=${enc(state.repo)}&ref=${enc(state.ref)}&paths=${enc(paths.join(","))}`;
+  // Fetched (not navigated) so limit / rate-limit refusals show as a clear status message instead of a JSON page.
+  status("Preparing zip…");
+  try {
+    const r = await fetch(url, { credentials: "include", signal: AbortSignal.timeout ? AbortSignal.timeout(600000) : undefined });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.message || d.error || `HTTP ${r.status}`); }
+    const blob = await r.blob();
+    const cd = r.headers.get("Content-Disposition") || "";
+    const m = /filename="([^"]+)"/.exec(cd);
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = m ? m[1] : "github.zip";
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    status(`Downloaded ${a.download} (${(blob.size / 1048576).toFixed(1)} MB)`);
+  } catch (e) { status(e.message, true); }
+}
+function renderSelbar() {
+  const n = state.sel.size;
+  els.selbar.hidden = n === 0;
+  els.selcount.textContent = `${n} selected`;
+}
+els.selbar.addEventListener("click", (e) => {
+  const k = e.target.closest("[data-ghbulk]")?.dataset.ghbulk;
+  if (!k) return;
+  if (k === "clear") { state.sel.clear(); els.list.querySelectorAll(".fm-row__check").forEach((c) => { c.checked = false; c.closest("li").classList.remove("is-selected"); }); return renderSelbar(); }
+  if (k === "all") { state.items.forEach((it) => state.sel.add(it.path)); els.list.querySelectorAll(".fm-row__check").forEach((c) => { c.checked = true; c.closest("li").classList.add("is-selected"); }); return renderSelbar(); }
+  if (k === "zip") downloadZip([...state.sel]);
+});
+els.dl.addEventListener("click", () => state.file && downloadFile(state.file.path));
+
 function showList() { els.viewer.hidden = true; els.list.hidden = false; }
 async function init() {
   if (state.inited) return;
@@ -85,7 +123,7 @@ async function init() {
   } catch (e) { state.inited = false; status(e.message, true); }
 }
 async function repos() {
-  state.repo = null; state.file = null; state.path = ""; els.branch.hidden = true; setEditable(false); showList(); crumbs();
+  state.repo = null; state.file = null; state.path = ""; state.sel.clear(); renderSelbar(); els.branch.hidden = true; setEditable(false); showList(); crumbs();
   try {
     const d = await api("/api/gh/repos");
     els.list.textContent = "";
@@ -111,16 +149,23 @@ async function openRepo(repo, ref, path = "") {
 }
 els.branch.addEventListener("change", () => { if (!guard()) { els.branch.value = state.ref; return; } state.ref = els.branch.value; tree(state.path); });
 async function tree(path) {
-  state.path = path; state.file = null; setEditable(false); showList(); crumbs();
+  state.path = path; state.file = null; state.sel.clear(); state.items = []; renderSelbar(); setEditable(false); showList(); crumbs();
   try {
     const d = await api(`/api/gh/tree?repo=${enc(state.repo)}&ref=${enc(state.ref)}&path=${enc(path)}`);
     els.list.textContent = "";
     if (path) { const li = el("li", "fm-row gh-row"); const b = el("button", "fm-row__name", "⬑ .."); b.type = "button"; b.onclick = () => tree(path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ""); li.appendChild(b); els.list.appendChild(li); }
+    state.items = d.items.filter((it) => it.type === "dir" || it.type === "file");
     d.items.forEach((it) => {
       const li = el("li", "fm-row gh-row");
+      if (it.type === "dir" || it.type === "file") {
+        const cb = el("input", "fm-row__check"); cb.type = "checkbox"; cb.setAttribute("aria-label", "Select " + it.name);
+        cb.addEventListener("change", () => { cb.checked ? state.sel.add(it.path) : state.sel.delete(it.path); li.classList.toggle("is-selected", cb.checked); renderSelbar(); });
+        li.appendChild(cb);
+      }
       const b = el("button", "fm-row__name", (it.type === "dir" ? "📁 " : "📄 ") + it.name); b.type = "button";
       b.onclick = () => (it.type === "dir" ? tree(it.path) : openFile(it.path));
-      li.append(b, el("span", "fm-row__meta", it.type === "dir" ? "Folder" : (it.size < 1024 ? it.size + " B" : (it.size / 1024).toFixed(1) + " KB")));
+      li.append(b, el("span", "fm-row__meta", it.type === "dir" ? "Folder" : (it.size < 1024 ? it.size + " B" : it.size < 1048576 ? (it.size / 1024).toFixed(1) + " KB" : (it.size / 1048576).toFixed(1) + " MB")));
+      if (it.type === "file") { const d1 = el("button", "ghost tiny gh-dl", "⬇"); d1.type = "button"; d1.title = "Download"; d1.setAttribute("aria-label", "Download " + it.name); d1.onclick = () => downloadFile(it.path); li.appendChild(d1); }
       els.list.appendChild(li);
     });
     status("");
@@ -130,9 +175,9 @@ async function openFile(path) {
   try {
     const d = await api(`/api/gh/file?repo=${enc(state.repo)}&ref=${enc(state.ref)}&path=${enc(path)}`);
     state.file = d;
-    els.list.hidden = true; els.viewer.hidden = false; els.name.textContent = d.name;
+    els.list.hidden = true; els.selbar.hidden = true; els.viewer.hidden = false; els.name.textContent = d.name;
     setEditable(false);
-    if (d.binary || d.too_large || d.content == null) { setDoc(d.too_large ? "(File larger than 1 MB — open it on GitHub.)" : "(Binary file — not shown.)", ""); els.edit.hidden = true; }
+    if (d.binary || d.too_large || d.content == null) { setDoc(d.too_large ? "(File larger than 1 MB — use Download.)" : "(Binary file — not shown. Use Download.)", ""); els.edit.hidden = true; }
     else setDoc(d.content, d.name);
     crumbs();
   } catch (e) { status(e.message, true); }
@@ -183,4 +228,4 @@ function openFav(p) {
   window.NLServerDrive && window.NLServerDrive.pick("github");
   openRepo(m[1], m[2], m[3]);
 }
-window.NLGitHub = { open: openFav, repos, tree: (p) => tree(p), file: (p) => openFile(p), openRepo, state };
+window.NLGitHub = { download: downloadFile, zip: downloadZip, open: openFav, repos, tree: (p) => tree(p), file: (p) => openFile(p), openRepo, state };

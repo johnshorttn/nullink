@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import os
 import re
 import time
+import zipfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +25,12 @@ MAX_FILE = 1024 * 1024
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 REF_RE = re.compile(r"^(?!.*\.\.)(?!/)(?!.*//)[A-Za-z0-9._/-]{1,200}(?<!/)(?<!\.lock)$")
 PATH_BAD = re.compile(r"[\x00-\x1f\x7f\\]")
+# Downloads (gh2): single file up to GitHub's blob limit; zip caps checked before any byte is sent.
+MAX_DL_FILE = 100 * 1024 * 1024
+ZIP_MAX_FILES = 1000
+ZIP_MAX_BYTES = 200 * 1024 * 1024
+ZIP_MAX_PATHS = 200
+RATE_RESERVE = 50
 
 
 def bind(mod):
@@ -83,6 +91,29 @@ def gh(method: str, path: str, body: dict | None = None, query: dict | None = No
         except ValueError:
             data = {}
         return e.code, {"message": str(data.get("message") or "")[:200]}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise GhErr(502, "github_unreachable")
+
+
+def gh_stream(path: str):
+    """Open a raw (binary) GitHub response for streaming. Returns a file-like object to be closed by
+    the caller. Patched in tests. Token never leaves this function."""
+    tok = token()
+    if not tok:
+        raise GhErr(503, "token_not_configured")
+    req = urllib.request.Request(API + path, method="GET")
+    req.add_header("Authorization", "Bearer " + tok)
+    req.add_header("Accept", "application/vnd.github.raw")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    req.add_header("User-Agent", "nullink-github-drive")
+    try:
+        return urllib.request.urlopen(req, timeout=60)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise GhErr(404, "not_found")
+        if e.code in (403, 429):
+            raise GhErr(429, "rate_limited", message="GitHub rate limit reached; try again later.")
+        raise GhErr(502, "github_error", status=e.code)
     except (urllib.error.URLError, TimeoutError, OSError):
         raise GhErr(502, "github_unreachable")
 
@@ -210,6 +241,10 @@ def _route(h, method, path, qs, rec, ip, sid):
                 out["binary"] = True
         audit("view", repo=repo, ref=ref, path=p, ip=ip, session=sid)
         return h._json(200, out)
+    if method == "GET" and path == "/api/gh/download":
+        return _download(h, qs, ip, sid)
+    if method == "GET" and path == "/api/gh/zip":
+        return _zip(h, qs, ip, sid)
     if method != "POST":
         raise GhErr(404, "not_found")
     b = h._read_json()
@@ -274,3 +309,149 @@ def _commit(h, b, ip, sid):
     audit("commit", repo=repo, branch=target, base=branch, path=p, mode=mode, commit=commit_sha,
           pr=out.get("pr_number"), message=message, ip=ip, session=sid)
     return h._json(200, out)
+
+
+# ---------- downloads (gh2): read-only, owner session, no step-up ----------
+def _disp(name: str) -> str:
+    safe = S.slugify(name)
+    return f"attachment; filename=\"{safe}\"; filename*=UTF-8''{urllib.parse.quote(name, safe='')}"
+
+
+def _rate_check(need: int) -> None:
+    st, data = gh("GET", "/rate_limit")  # free call: does not count against the limit
+    if st != 200 or not isinstance(data, dict):
+        return
+    core = (data.get("resources") or {}).get("core") or {}
+    rem = core.get("remaining")
+    if isinstance(rem, int) and rem < need + RATE_RESERVE:
+        raise GhErr(429, "rate_limited", remaining=rem, reset=core.get("reset"),
+                    message=f"GitHub rate limit too low for this download ({rem} calls left); try again later.")
+
+
+def _copy(src, dst, n=1024 * 1024):
+    while True:
+        b = src.read(n)
+        if not b:
+            break
+        dst.write(b)
+
+
+def _download(h, qs, ip, sid):
+    repo, ref, p = _repo(_q(qs, "repo")), _ref(_q(qs, "ref")), _path(_q(qs, "path"), False)
+    st, meta = gh("GET", f"/repos/{repo}/contents/{_enc(p)}", query={"ref": ref})
+    meta = _ok(st, meta)
+    if not isinstance(meta, dict) or meta.get("type") != "file":
+        raise GhErr(400, "not_a_file")
+    size, sha = int(meta.get("size") or 0), str(meta.get("sha") or "")
+    if size > MAX_DL_FILE:
+        raise GhErr(413, "file_too_large", limit=MAX_DL_FILE,
+                    message="Files over 100 MB can't be downloaded through GitHub's API; use git or GitHub.")
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise GhErr(502, "github_error")
+    src = gh_stream(f"/repos/{repo}/git/blobs/{sha}")  # blob API: binary-safe, up to 100 MB
+    name = str(meta.get("name") or p.split("/")[-1])
+    ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    try:
+        h.send_response(200)
+        h.send_header("Content-Type", ctype)
+        h.send_header("Content-Length", str(size))
+        h.send_header("Content-Disposition", _disp(name))
+        h.send_header("Cache-Control", "no-store")
+        h.send_header("X-Content-Type-Options", "nosniff")
+        h.send_header("Content-Security-Policy", "sandbox")
+        h.end_headers()
+        audit("download", repo=repo, ref=ref, path=p, size=size, ip=ip, session=sid)
+        try:
+            _copy(src, h.wfile)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+    finally:
+        src.close()
+
+
+def _csvq(qs, key):
+    out = []
+    for v in qs.get(key) or []:
+        out.extend(x for x in str(v).split(",") if x)
+    return out
+
+
+def _zip(h, qs, ip, sid):
+    repo, ref = _repo(_q(qs, "repo")), _ref(_q(qs, "ref"))
+    raw = _csvq(qs, "paths")
+    if not raw:
+        raise GhErr(400, "nothing_selected")
+    if len(raw) > ZIP_MAX_PATHS:
+        raise GhErr(413, "too_many_selected", limit=ZIP_MAX_PATHS)
+    sel = list(dict.fromkeys(_path(x, False) for x in raw))
+    st, tr = gh("GET", f"/repos/{repo}/git/trees/{_enc(ref)}", query={"recursive": "1"})
+    tr = _ok(st, tr)
+    if tr.get("truncated"):
+        raise GhErr(413, "repo_too_large",
+                    message="This repo is too large to list in one go; download fewer/smaller folders on GitHub.")
+    entries = [e for e in tr.get("tree") or [] if isinstance(e, dict)]
+    by_path = {e.get("path"): e for e in entries}
+    files: dict[str, dict] = {}
+    dirs: list[str] = []
+    for s in sel:
+        e = by_path.get(s)
+        if e is None:
+            raise GhErr(404, "not_found", path=s)
+        if e.get("type") == "blob":
+            files[s] = e
+        elif e.get("type") == "tree":
+            dirs.append(s + "/")
+            pre = s + "/"
+            for x in entries:
+                xp = str(x.get("path") or "")
+                if xp.startswith(pre):
+                    if x.get("type") == "blob":
+                        files[xp] = x
+                    elif x.get("type") == "tree":
+                        dirs.append(xp + "/")
+        # submodules (type "commit") are skipped
+    if not files and not dirs:
+        raise GhErr(404, "nothing_to_zip")
+    total = sum(int(e.get("size") or 0) for e in files.values())
+    if len(files) > ZIP_MAX_FILES:
+        raise GhErr(413, "too_many_files", count=len(files), limit=ZIP_MAX_FILES,
+                    message=f"{len(files)} files selected; the zip limit is {ZIP_MAX_FILES}.")
+    if total > ZIP_MAX_BYTES:
+        raise GhErr(413, "zip_too_large", bytes=total, limit=ZIP_MAX_BYTES,
+                    message=f"Selection is {total // (1024 * 1024)} MB; the zip limit is {ZIP_MAX_BYTES // (1024 * 1024)} MB.")
+    for e in files.values():
+        if not re.fullmatch(r"[0-9a-f]{40}", str(e.get("sha") or "")):
+            raise GhErr(502, "github_error")
+    _rate_check(len(files))
+    base = repo.split("/")[1]
+    zname = (sel[0].split("/")[-1] if len(sel) == 1 and dirs else base) + ".zip"
+    h.send_response(200)
+    h.send_header("Content-Type", "application/zip")
+    h.send_header("Content-Disposition", _disp(zname))
+    h.send_header("Cache-Control", "no-store")
+    h.send_header("X-Content-Type-Options", "nosniff")
+    h.send_header("Connection", "close")
+    h.end_headers()
+    h.close_connection = True
+    audit("zip", repo=repo, ref=ref, paths=",".join(sel), files=len(files), bytes=total, ip=ip, session=sid)
+    from fm_uploads import _Sink
+    try:
+        with zipfile.ZipFile(_Sink(h.wfile), "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
+            for d in dict.fromkeys(dirs):
+                z.writestr(zipfile.ZipInfo(d), b"")
+            for arc in sorted(files):
+                e = files[arc]
+                src = gh_stream(f"/repos/{repo}/git/blobs/{e['sha']}")
+                try:
+                    zi = zipfile.ZipInfo(arc, time.localtime()[:6])
+                    zi.compress_type = zipfile.ZIP_DEFLATED
+                    if e.get("mode") == "100755":
+                        zi.external_attr = 0o100755 << 16
+                    with z.open(zi, "w", force_zip64=True) as dst:
+                        _copy(src, dst)
+                finally:
+                    src.close()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    except GhErr as ex:  # mid-stream failure: headers already sent; drop the connection (zip left incomplete)
+        audit("zip_aborted", repo=repo, ref=ref, err=ex.err, ip=ip, session=sid)
