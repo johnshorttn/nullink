@@ -26,7 +26,8 @@
     if (n == null) return "";
     if (n < 1024) return n + " B";
     if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
-    return (n / 1048576).toFixed(1) + " MB";
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+    return (n / 1073741824).toFixed(2) + " GB";
   }
   function fmtDate(s) {
     if (!s) return "";
@@ -261,7 +262,7 @@
     els.selcount.textContent = `${n} selected`;
     els.selbar.querySelectorAll("[data-bulk]").forEach((b) => {
       const k = b.dataset.bulk;
-      b.hidden = state.trashView ? (k === "move" || k === "trash") : (k === "restore" || k === "purge");
+      b.hidden = state.trashView ? (k === "move" || k === "trash" || k === "zip") : (k === "restore" || k === "purge");
     });
   }
   els.selbar.addEventListener("click", (e) => {
@@ -270,6 +271,7 @@
     const { ids, folders } = selected();
     if (k === "clear") { state.sel.clear(); return render(); }
     if (k === "move") return moveDialog(ids, folders);
+    if (k === "zip") return downloadZip(ids, folders);
     if (k === "trash") return trashItems(ids, folders);
     if (k === "restore") return restore(ids);
     if (k === "purge") return purge(ids);
@@ -408,19 +410,68 @@
     refresh();
   }
 
+  // Chunked, resumable uploads (up to ~5 GB per file). The upload id is remembered in
+  // localStorage per file+folder, so re-picking the same file after a drop resumes it.
+  const UP_KEY = "nl.fm.uploads";
+  const upStore = () => { try { return JSON.parse(localStorage.getItem(UP_KEY) || "{}"); } catch (_) { return {}; } };
+  const upSave = (o) => { try { localStorage.setItem(UP_KEY, JSON.stringify(o)); } catch (_) {} };
+  const upFp = (f, folder) => [folder, f.name, f.size, f.lastModified].join("|");
+  async function uploadOne(f, folder, idx, total) {
+    const fp = upFp(f, folder);
+    const store = upStore();
+    let up = null;
+    if (store[fp]) { try { up = await api(`/api/fm/uploads/${store[fp]}`); } catch (_) { up = null; } }
+    if (!up) {
+      up = await api("/api/fm/uploads", { json: { name: f.name, size: f.size, folder } });
+      const s2 = upStore(); s2[fp] = up.upload_id; upSave(s2);
+    }
+    const id = up.upload_id, cs = up.chunk_size || 8388608;
+    let off = up.received || 0, tries = 0;
+    while (off < f.size) {
+      const end = Math.min(off + cs, f.size);
+      const pct = f.size ? Math.floor((off / f.size) * 100) : 100;
+      status(`Uploading ${idx}/${total}: ${f.name} — ${pct}% (${fmtSize(off)} of ${fmtSize(f.size)})`);
+      try {
+        const r = await fetch(`/api/fm/uploads/${id}/chunk?offset=${off}`, {
+          method: "POST", credentials: "include", headers: { "Content-Type": "application/octet-stream" },
+          body: f.slice(off, end),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.status === 409 && typeof d.received === "number") { off = d.received; continue; }
+        if (!r.ok) throw new Error(d.message || d.error || `HTTP ${r.status}`);
+        off = d.received; tries = 0;
+      } catch (e) {
+        if (++tries > 5) throw e;
+        await new Promise((res) => setTimeout(res, 1000 * tries));
+        try { off = (await api(`/api/fm/uploads/${id}`)).received; } catch (_) {}
+      }
+    }
+    const done = await api(`/api/fm/uploads/${id}/complete`, { json: {} });
+    const s3 = upStore(); delete s3[fp]; upSave(s3);
+    return done;
+  }
   async function uploadFiles(list) {
     list = Array.from(list || []);
     if (!list.length) return;
-    const fd = new FormData();
-    list.forEach((f) => fd.append("file", f));
-    fd.append("labels", "inbox");
-    status(`Uploading ${list.length} file(s)…`);
-    try {
-      const d = await api(`/api/fm/upload?folder=${encodeURIComponent(state.cwd)}`, { method: "POST", body: fd });
-      status(`Uploaded ${d.count || list.length} file(s)` + (d.errors && d.errors.length ? ` (${d.errors.length} skipped)` : ""));
-      refresh();
-      NL().loadFiles && NL().loadFiles();
-    } catch (e) { status(e.message, true); }
+    const folder = state.cwd;
+    let ok = 0; const errs = [];
+    for (let i = 0; i < list.length; i++) {
+      try { await uploadOne(list[i], folder, i + 1, list.length); ok++; }
+      catch (e) { errs.push(`${list[i].name}: ${e.message}`); }
+    }
+    status(`Uploaded ${ok} file(s)` + (errs.length ? ` — ${errs.length} failed: ${errs[0]}` : ""), errs.length > 0);
+    refresh();
+    NL().loadFiles && NL().loadFiles();
+  }
+  function downloadZip(ids, folders) {
+    const q = new URLSearchParams();
+    if (ids.length) q.set("ids", ids.join(","));
+    if (folders.length) q.set("folders", folders.join(","));
+    const a = document.createElement("a");
+    a.href = `/api/fm/zip?${q}`;
+    a.rel = "noopener";
+    document.body.appendChild(a); a.click(); a.remove();
+    status("Preparing zip download…");
   }
 
   // ---- drag & drop ----
