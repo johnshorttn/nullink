@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Nullink</title>
   <link rel="stylesheet" href="/tokens.css?v=fluid4c" />
-  <link rel="stylesheet" href="/style.css?v=ed1-fav1-fluid4c-mail1-rp3-fm1" />
+  <link rel="stylesheet" href="/style.css?v=ed1-fav1-fluid4c-mail1-rp3-fm1-vl1" />
 </head>
 <body>
   <div id="app">
@@ -131,7 +131,8 @@
             <span class="section-label">Vault</span>
             <button type="button" id="vault-new-btn" class="ghost tiny" title="New snippet">+</button>
           </div>
-          <input id="vault-search" type="search" class="vault-search" placeholder="Search vault…" autocomplete="off" />
+          <input id="vault-search" type="search" class="vault-search" placeholder="Search titles &amp; labels…" autocomplete="off" />
+          <div id="vault-labels" class="vault-labels" role="group" aria-label="Filter by label"></div>
           <ul id="vault-list" class="vault-list"></ul>
           <p id="vault-empty" class="hint vault-empty">No snippets yet.</p>
         </div>
@@ -494,9 +495,14 @@
             <label class="vault-field">Title
               <input id="vault-title-input" type="text" maxlength="200" placeholder="Title…" />
             </label>
-            <label class="vault-field">Tags <span class="hint">(comma-separated)</span>
-              <input id="vault-tags-input" type="text" maxlength="200" placeholder="creds, otp, notes…" />
-            </label>
+            <div class="vault-field">Labels
+              <div id="vault-tag-editor" class="vault-tag-editor">
+                <span id="vault-tag-chips" class="vault-tag-chips"></span>
+                <input id="vault-tag-entry" type="text" maxlength="40" list="vault-label-options" placeholder="Add label…" autocomplete="off" enterkeyhint="done" />
+              </div>
+              <datalist id="vault-label-options"></datalist>
+              <input id="vault-tags-input" type="hidden" />
+            </div>
             <label class="vault-field vault-body-field">Body
               <textarea id="vault-body-input" spellcheck="false" placeholder="Snippet body…"></textarea>
             </label>
@@ -663,7 +669,7 @@
 
   <div id="guest-banner" class="guest-banner hidden" role="status"></div>
   <script src="/vendor/socket.io.min.js?v=4.8.1"></script>
-  <script src="/app.js?v=sio1-ssh1-vault1-fm1-ed1"></script>
+  <script src="/app.js?v=sio1-ssh1-vault1-fm1-ed1-vl1"></script>
   <script src="/guest.js?v=g4"></script>
   <script src="/sanitize.js?v=ed1"></script>
   <script src="/favorites.js?v=fav2"></script>
