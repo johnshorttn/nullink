@@ -8,3 +8,5 @@ and automatically roll back if the health check fails.
 - `.git` must stay owned by `morc` (fixed 2026-10-21 after root-owned objects blocked fetches).
 - Never edit tracked files on prod by hand: the hook refuses to deploy over tracked changes.
 - Backups: `~morc/nullink-backups/` (files.json + code tarballs, mode 600).
+
+- 2026-10-21: hook verified after safe.directory fix (PR #17).
