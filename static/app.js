@@ -1812,6 +1812,7 @@ btnSplit.addEventListener("click", () => {
         });
       }
       renderFiles();
+      document.dispatchEvent(new CustomEvent("nl:files-loaded"));
     } catch { /* ignore */ }
   }
 
@@ -1882,6 +1883,7 @@ btnSplit.addEventListener("click", () => {
   }
 
   function showEditor(name, content, fileId) {
+    document.dispatchEvent(new CustomEvent("nl:editor-open", { detail: { fileId: fileId || null } }));
     editorOpen = true;
     activeFileId = fileId || null;
     savedContent = content;
@@ -3219,6 +3221,9 @@ btnSplit.addEventListener("click", () => {
   if (vaultTagsInput) vaultTagsInput.addEventListener("input", markVaultDirty);
   if (vaultBodyInput) vaultBodyInput.addEventListener("input", markVaultDirty);
 
+
+  // Files manager (static/files-manager.js) reuses the editor, Ask Morc and step-up flow.
+  window.NL = Object.assign(window.NL || {}, { openFile, loadFiles, stepUpFetch, setMode, showAuth });
 
   checkAuth();
 })();
