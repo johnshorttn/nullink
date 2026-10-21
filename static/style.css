@@ -2613,3 +2613,15 @@ body.is-guest #guest-audit-btn { display: none !important; }
 .fm-share-url { width: 100%; box-sizing: border-box; padding: 6px 8px; }
 .fm-share-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; font-size: 13px; }
 .fm-share-item { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* GitHub drive (gh1) */
+.gh-viewer { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.gh-viewer__bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.gh-viewer__actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.gh-cm { border: 1px solid var(--border, #2a3142); border-radius: 8px; overflow: auto; min-height: 320px; max-height: 70vh; }
+.gh-cm .cm-editor { min-height: 320px; }
+.gh-branch { max-width: 220px; }
+.gh-editing { color: #ffb86b; font-weight: 600; }
+.gh-msg { width: 100%; box-sizing: border-box; padding: 6px 8px; margin-bottom: 8px; }
+#gh .fm-row { display: flex; justify-content: space-between; gap: 8px; padding: 8px 10px; }
+#gh .fm-row__name { background: none; border: 0; color: inherit; font: inherit; cursor: pointer; text-align: left; padding: 0; }

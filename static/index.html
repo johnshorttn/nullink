@@ -284,7 +284,37 @@
           <div id="drive-switch" class="drive-switch" role="tablist" aria-label="Drive">
             <button type="button" class="drive-tab is-active" data-drive="files" role="tab" aria-selected="true">Nullink Files</button>
             <button type="button" class="drive-tab" data-drive="server" role="tab" aria-selected="false">Server</button>
+            <button type="button" class="drive-tab" data-drive="github" role="tab" aria-selected="false">GitHub</button>
           </div>
+          <section id="gh" class="fm gh" aria-label="GitHub drive" hidden>
+            <header class="fm-bar">
+              <nav id="gh-crumbs" class="fm-crumbs" aria-label="GitHub location"></nav>
+              <div class="fm-actions">
+                <select id="gh-branch" class="gh-branch" aria-label="Branch" hidden></select>
+                <span id="gh-mode" class="sd-timer">Read-only</span>
+              </div>
+            </header>
+            <p id="gh-banner" class="sd-banner">Read-only. Editing needs a fresh authenticator code; every commit is logged.</p>
+            <div id="gh-unconfigured" class="sd-locked" hidden>
+              <h3>GitHub token not configured</h3>
+              <p class="hint">Add a GitHub token on the server at <code>secrets/github_token.txt</code> (owner-only, never sent to the browser). Then reload.</p>
+            </div>
+            <ul id="gh-list" class="fm-list" role="list"></ul>
+            <div id="gh-viewer" class="gh-viewer" hidden>
+              <div class="gh-viewer__bar">
+                <strong id="gh-file-name"></strong>
+                <span class="gh-viewer__actions">
+                  <button type="button" id="gh-edit" class="ghost toolbar-btn">Edit</button>
+                  <button type="button" id="gh-find" class="ghost toolbar-btn">Find</button>
+                  <button type="button" id="gh-wrap" class="ghost toolbar-btn">Wrap</button>
+                  <button type="button" id="gh-save" class="accent-btn toolbar-btn" hidden>Commit…</button>
+                  <button type="button" id="gh-cancel" class="ghost toolbar-btn" hidden>Cancel</button>
+                </span>
+              </div>
+              <div id="gh-cm" class="gh-cm"></div>
+            </div>
+            <p id="gh-status" class="fm-status" role="status" aria-live="polite"></p>
+          </section>
           <section id="sd" class="fm sd" aria-label="Server drive" hidden>
             <div id="sd-locked" class="sd-locked">
               <h3>Server drive is locked</h3>
@@ -636,10 +666,11 @@
   <script src="/app.js?v=sio1-ssh1-vault1-fm1-ed1"></script>
   <script src="/guest.js?v=g4"></script>
   <script src="/sanitize.js?v=ed1"></script>
-  <script src="/favorites.js?v=fav1"></script>
+  <script src="/favorites.js?v=fav2"></script>
   <script src="/files-manager.js?v=fm4"></script>
-  <script src="/server-drive.js?v=sd2"></script>
+  <script src="/server-drive.js?v=sd3"></script>
   <script type="module" src="/editor.js?v=ed1"></script>
+  <script type="module" src="/github-drive.js?v=gh1"></script>
   <div id="apps-fs-chrome" class="apps-fs-chrome hidden"><button type="button" id="btn-apps-exit-fs-floating" class="accent-btn toolbar-btn">Exit full screen</button></div>
 </body>
 </html>
