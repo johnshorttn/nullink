@@ -270,6 +270,35 @@
 
         <!-- Files / editor panel -->
         <div id="panel-files" class="panel hidden">
+          <div id="drive-switch" class="drive-switch" role="tablist" aria-label="Drive">
+            <button type="button" class="drive-tab is-active" data-drive="files" role="tab" aria-selected="true">Nullink Files</button>
+            <button type="button" class="drive-tab" data-drive="server" role="tab" aria-selected="false">Server</button>
+          </div>
+          <section id="sd" class="fm sd" aria-label="Server drive" hidden>
+            <div id="sd-locked" class="sd-locked">
+              <h3>Server drive is locked</h3>
+              <p class="hint">This drive shows the server's whole filesystem (<code>/</code>) as the Nullink service user sees it. Enter a code from your authenticator app to open it for 15 minutes. Every action is logged.</p>
+              <form id="sd-unlock-form" class="sd-unlock">
+                <input id="sd-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="6-digit code" aria-label="Authenticator code" />
+                <button type="submit" class="accent-btn toolbar-btn">Unlock</button>
+              </form>
+            </div>
+            <div id="sd-open" hidden>
+              <header class="fm-bar">
+                <nav id="sd-crumbs" class="fm-crumbs" aria-label="Current folder"></nav>
+                <div class="fm-actions">
+                  <span id="sd-timer" class="sd-timer" title="Unlock time left"></span>
+                  <label class="ghost toolbar-btn fm-upload" title="Upload (needs authenticator code)">Upload<input type="file" id="sd-upload-input" hidden /></label>
+                  <button type="button" id="sd-new-folder" class="ghost toolbar-btn">New folder</button>
+                  <button type="button" id="sd-lock" class="ghost toolbar-btn">Lock</button>
+                </div>
+              </header>
+              <p class="sd-banner">Read-only unless you confirm a change. No Trash: deletes are permanent. Secrets, env and token files are hidden.</p>
+              <ul id="sd-list" class="fm-list sd-list" role="list"></ul>
+              <p id="sd-empty" class="hint fm-empty" hidden>This folder is empty.</p>
+            </div>
+            <p id="sd-status" class="fm-status" role="status" aria-live="polite"></p>
+          </section>
           <section id="fm" class="fm" aria-label="File manager">
             <header class="fm-bar">
               <nav id="fm-crumbs" class="fm-crumbs" aria-label="Current folder"></nav>
@@ -592,6 +621,7 @@
   <script src="/app.js?v=sio1-ssh1-vault1-fm1"></script>
   <script src="/guest.js?v=g4"></script>
   <script src="/files-manager.js?v=fm1"></script>
+  <script src="/server-drive.js?v=sd1"></script>
   <div id="apps-fs-chrome" class="apps-fs-chrome hidden"><button type="button" id="btn-apps-exit-fs-floating" class="accent-btn toolbar-btn">Exit full screen</button></div>
 </body>
 </html>
