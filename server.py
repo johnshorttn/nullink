@@ -26,6 +26,7 @@ from pathlib import Path
 import sys as _sys
 import share_links
 import files_manager
+import server_drive
 import ai_rooms
 
 from phone_bridge import PhoneBridgeError, get_bridge
@@ -3986,6 +3987,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/fm") and files_manager.handle(self, "GET", path, qs):
             return
+        if path.startswith("/api/sd") and server_drive.handle(self, "GET", path, qs):
+            return
         if path == "/api/guest/requests":
             return self._guest_owner_list()
         if path == "/api/guest/audit":
@@ -4072,6 +4075,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("app.js", "application/javascript; charset=utf-8")
         if path == "/files-manager.js":
             return self._serve_static("files-manager.js", "application/javascript; charset=utf-8")
+        if path == "/server-drive.js":
+            return self._serve_static("server-drive.js", "application/javascript; charset=utf-8")
         if path == "/vendor/socket.io.min.js":
             return self._serve_static("vendor/socket.io.min.js", "application/javascript; charset=utf-8")
         if path == "/phone-drive.js":
@@ -4479,6 +4484,9 @@ class Handler(BaseHTTPRequestHandler):
         if self._guest_gate("POST", path):
             return
         if path.startswith("/api/fm") and files_manager.handle(
+                self, "POST", path, urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)):
+            return
+        if path.startswith("/api/sd") and server_drive.handle(
                 self, "POST", path, urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)):
             return
         if path == "/api/guest/request":
@@ -6587,6 +6595,7 @@ def main() -> None:
 
 share_links.bind(_sys.modules[__name__])
 files_manager.bind(_sys.modules[__name__])
+server_drive.bind(_sys.modules[__name__])
 
 if __name__ == "__main__":
     main()

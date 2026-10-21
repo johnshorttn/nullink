@@ -2494,3 +2494,26 @@ body.is-guest #guest-audit-btn { display: none !important; }
   .fm-row__meta { display: none; }
   .fm-actions .toolbar-btn { flex: 1 1 auto; }
 }
+
+/* ---- Server drive (sd1) ---- */
+.drive-switch { display: flex; gap: 4px; padding: 8px 12px 0; }
+.drive-tab { background: transparent; border: 1px solid var(--border, #333); color: inherit; border-radius: 999px; padding: 4px 14px; cursor: pointer; font: inherit; font-size: 13px; }
+.drive-tab.is-active { background: var(--accent, #3b82f6); border-color: transparent; color: #fff; }
+.sd-locked { max-width: 440px; margin: 32px auto; padding: 20px; border: 1px solid var(--border, #333); border-radius: 12px; }
+.sd-locked h3 { margin: 0 0 8px; }
+.sd-unlock { display: flex; gap: 8px; margin-top: 12px; }
+.sd-unlock input { flex: 1; min-width: 0; font-size: 18px; letter-spacing: 4px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border, #333); background: transparent; color: inherit; }
+.sd-banner { margin: 0; padding: 6px 12px; font-size: 12px; background: rgba(234,179,8,.12); color: var(--warn, #eab308); }
+.sd-timer { font-size: 12px; opacity: .75; align-self: center; margin-right: 6px; }
+.sd-list li.sd-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--border, #2a2a2a); }
+.sd-row .sd-name { background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; }
+.sd-row .sd-meta { font-size: 12px; opacity: .65; white-space: nowrap; font-family: ui-monospace, monospace; }
+.sd-row.is-masked .sd-name, .sd-row.is-link .sd-name { opacity: .55; cursor: default; }
+.sd-row .sd-acts { display: flex; gap: 4px; }
+.sd-preview { max-height: 60vh; overflow: auto; white-space: pre; font-family: ui-monospace, monospace; font-size: 12px; margin: 0; }
+.sd-preview-img { max-width: 100%; max-height: 60vh; }
+@media (max-width: 640px) {
+  .sd-list li.sd-row { grid-template-columns: 1fr auto; }
+  .sd-row .sd-meta.sd-mode, .sd-row .sd-meta.sd-date { display: none; }
+}
+.fm[hidden], .sd [hidden], #sd[hidden] { display: none !important; }
