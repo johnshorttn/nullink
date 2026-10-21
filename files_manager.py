@@ -192,7 +192,15 @@ def handle(h, method: str, path: str, qs) -> bool:
         return False
     if path != "/api/fm" and not path.startswith("/api/fm/"):
         return False
-    if not _owner(h):
+    if h.headers.get("Authorization") is not None:
+        h._json(403, {"error": "forbidden", "message": "owner cookie session required"})
+        return True
+    rec = h._require_owner()
+    if rec is None:
+        return True
+    if path == "/api/fm/favorites" or path.startswith("/api/fm/favorites/"):
+        import favorites
+        favorites.handle(h, method, path, rec)
         return True
     if method == "POST" and path in ("/api/fm/trash", "/api/fm/empty-trash", "/api/fm/purge"):
         if not h._require_stepup():

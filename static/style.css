@@ -2517,3 +2517,40 @@ body.is-guest #guest-audit-btn { display: none !important; }
   .sd-row .sd-meta.sd-mode, .sd-row .sd-meta.sd-date { display: none; }
 }
 .fm[hidden], .sd [hidden], #sd[hidden] { display: none !important; }
+
+/* ---- Favorites (fav1) ---- */
+.fav-section { margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border, rgba(127,127,127,.25)); }
+.fav-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.fav-item { display: flex; align-items: center; gap: 4px; border-radius: 8px; padding: 2px 4px; }
+.fav-item:hover { background: var(--hover, rgba(127,127,127,.12)); }
+.fav-item.is-drag { opacity: .5; }
+.fav-item.is-over { box-shadow: inset 0 2px 0 var(--accent, #4b8bf5); }
+.fav-handle { cursor: grab; touch-action: none; user-select: none; opacity: .55; font-size: 12px; padding: 6px 2px; }
+.fav-open { flex: 1; min-width: 0; text-align: left; background: none; border: 0; color: inherit; font: inherit;
+  padding: 6px 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.fav-act { opacity: .6; min-width: 28px; min-height: 28px; }
+.fav-item:hover .fav-act, .fav-act:focus-visible { opacity: 1; }
+.fav-empty, .fav-status { margin: 4px 6px; font-size: 12px; }
+.fav-status:empty { display: none; }
+.fav-star { background: none; border: 0; color: var(--muted, #8a8f98); cursor: pointer; font-size: 15px; line-height: 1;
+  padding: 4px 6px; min-width: 28px; min-height: 28px; }
+.fav-star.is-on { color: #f5b700; }
+.fm-tree__row .fav-star { margin-left: auto; opacity: 0; }
+.fm-tree__row:hover .fav-star, .fm-tree__row .fav-star.is-on, .fm-tree__row .fav-star:focus-visible { opacity: 1; }
+@media (hover: none) { .fm-tree__row .fav-star { opacity: .7; } .fav-act { opacity: 1; } }
+/* Keep the Files sidebar (favorites + tree) scrollable instead of spilling over the footer. */
+#files-sidebar { overflow-y: auto; overscroll-behavior: contain; }
+#files-sidebar > * { flex-shrink: 0; }
+.fav-open { font-size: 13px; }
+.fav-section .section-label-row { margin-bottom: 0; }
+@media (max-width: 720px) {
+  /* Phone: let the roster drawer scroll so Favorites + the folder tree are never squeezed to 0. */
+  #roster-drawer { overflow-y: auto; }
+  #roster-drawer > * { flex-shrink: 0; }
+  #files-sidebar { flex: 0 0 auto; overflow: visible; }
+}
+.fav-strip { display: none; margin: 0 0 8px; border: 1px solid var(--border, rgba(127,127,127,.25)); border-radius: 10px; padding: 4px 8px; }
+.fav-strip > summary { cursor: pointer; font-size: 13px; padding: 6px 2px; color: var(--muted, #8a8f98); }
+.fav-strip .fav-open { font-size: 14px; padding: 8px 4px; }
+.fav-strip .fav-act, .fav-strip .fav-handle { min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; }
+@media (max-width: 720px) { .fav-strip:not([hidden]) { display: block; } }

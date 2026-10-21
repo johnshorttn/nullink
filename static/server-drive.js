@@ -70,6 +70,7 @@
     try {
       const d = await api(`/api/sd/list?path=${q(p)}`);
       state.cwd = d.path; crumbs(d.path); render(d.items, d.truncated);
+      if (window.NLFav) els.crumbs.appendChild(window.NLFav.star("server", d.path));
     } catch (e) { status(e.message === "permission_denied" ? "The Nullink service user can't open that folder." : e.message, true); }
   }
   function render(items, truncated) {
@@ -91,6 +92,7 @@
       li.appendChild(el("span", "sd-meta sd-mode", it.masked ? "" : it.mode || ""));
       li.appendChild(el("span", "sd-meta sd-date", it.kind === "file" ? size(it.size) : ""));
       const acts = el("span", "sd-acts");
+      if (!it.masked && it.kind === "dir" && window.NLFav) acts.appendChild(window.NLFav.star("server", it.path));
       if (!it.masked) {
         if (it.kind === "file") { const dl = el("a", "ghost tiny", "⬇"); dl.href = `/api/sd/download?path=${q(it.path)}`; dl.title = "Download"; acts.appendChild(dl); }
         const mv = el("button", "ghost tiny", "✎"); mv.type = "button"; mv.title = "Rename"; mv.onclick = () => rename(it); acts.appendChild(mv);
@@ -152,5 +154,6 @@
     try { await api(`/api/sd/upload?path=${q(state.cwd)}&name=${q(f.name)}`, { method: "POST", body: f }, true); status(`Uploaded ${f.name}.`); load(state.cwd); }
     catch (e) { status(e.message, true); }
   });
-  window.NLServerDrive = { pick };
+  function openPath(p) { state.cwd = p || "/"; pick("server"); }
+  window.NLServerDrive = { pick, open: openPath, rerender: () => { if (!els.open.hidden) load(state.cwd); } };
 })();
