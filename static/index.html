@@ -300,11 +300,18 @@
               <h3>GitHub token not configured</h3>
               <p class="hint">Add a GitHub token on the server at <code>secrets/github_token.txt</code> (owner-only, never sent to the browser). Then reload.</p>
             </div>
+            <div id="gh-selbar" class="fm-selbar" hidden>
+              <span id="gh-selcount"></span>
+              <button type="button" class="ghost tiny" data-ghbulk="zip">Download zip</button>
+              <button type="button" class="ghost tiny" data-ghbulk="all">Select all</button>
+              <button type="button" class="ghost tiny" data-ghbulk="clear">Clear</button>
+            </div>
             <ul id="gh-list" class="fm-list" role="list"></ul>
             <div id="gh-viewer" class="gh-viewer" hidden>
               <div class="gh-viewer__bar">
                 <strong id="gh-file-name"></strong>
                 <span class="gh-viewer__actions">
+                  <button type="button" id="gh-download" class="ghost toolbar-btn">Download</button>
                   <button type="button" id="gh-edit" class="ghost toolbar-btn">Edit</button>
                   <button type="button" id="gh-find" class="ghost toolbar-btn">Find</button>
                   <button type="button" id="gh-wrap" class="ghost toolbar-btn">Wrap</button>

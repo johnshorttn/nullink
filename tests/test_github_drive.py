@@ -187,3 +187,121 @@ class GuestGHTests(GHBase):
         ck, _ = self.guest("full")
         self.assertEqual(self.req("/api/gh/repos", cookie=ck)[0], 403)
         self.assertEqual(self.req("/api/gh/commit", "POST", {}, cookie=ck)[0], 403)
+
+
+# ---------- gh2: downloads ----------
+import io
+import zipfile
+
+BIN = bytes(range(256)) * 10 + b"\x00\xff"
+
+
+class DLFake(FakeGH):
+    def __init__(self):
+        super().__init__()
+        self.streams = []
+        self.remaining = 5000
+        self.tree = [
+            {"path": "README.md", "type": "blob", "sha": "1" * 40, "size": 6, "mode": "100644"},
+            {"path": "docs", "type": "tree", "sha": "2" * 40},
+            {"path": "docs/a.md", "type": "blob", "sha": "3" * 40, "size": 2, "mode": "100644"},
+            {"path": "docs/sub", "type": "tree", "sha": "4" * 40},
+            {"path": "docs/sub/run.sh", "type": "blob", "sha": "5" * 40, "size": 3, "mode": "100755"},
+            {"path": "docs/mod", "type": "commit", "sha": "6" * 40},
+            {"path": "img/logo.png", "type": "blob", "sha": "7" * 40, "size": len(BIN), "mode": "100644"},
+            {"path": "docsx/no.md", "type": "blob", "sha": "8" * 40, "size": 1, "mode": "100644"},
+        ]
+        self.truncated = False
+        self.blobs = {"1" * 40: b"hello\n", "3" * 40: b"A\n", "5" * 40: b"#!\n", "7" * 40: BIN, "8" * 40: b"x"}
+
+    def __call__(self, method, path, body=None, query=None):
+        if path == "/rate_limit":
+            self.calls.append((method, path, body, query))
+            return 200, {"resources": {"core": {"remaining": self.remaining, "reset": 1}}}
+        if "/git/trees/" in path:
+            self.calls.append((method, path, body, query))
+            return 200, {"tree": self.tree, "truncated": self.truncated}
+        if path.endswith("/contents/img/logo.png"):
+            return 200, {"type": "file", "name": "logo.png", "path": "img/logo.png", "size": len(BIN), "sha": "7" * 40}
+        if path.endswith("/contents/big.bin"):
+            return 200, {"type": "file", "name": "big.bin", "path": "big.bin", "size": GH.MAX_DL_FILE + 1, "sha": "9" * 40}
+        return super().__call__(method, path, body, query)
+
+    def stream(self, path):
+        self.streams.append(path)
+        return io.BytesIO(self.blobs[path.rsplit("/", 1)[1]])
+
+
+class DownloadTests(GHBase):
+    def setUp(self):
+        super().setUp()
+        self.fake = DLFake()
+        for name, val in (("gh", self.fake), ("gh_stream", self.fake.stream)):
+            p = patch.object(GH, name, val)
+            p.start(); self.addCleanup(p.stop)
+
+    def test_single_binary_file(self):
+        st, hd, _, raw = self.g("/api/gh/download?repo=johnshorttn/nullink&ref=main&path=img/logo.png")
+        self.assertEqual(st, 200)
+        hd = {k.lower(): v for k, v in hd}
+        self.assertEqual(raw, BIN)
+        self.assertEqual(hd["content-type"], "image/png")
+        self.assertEqual(hd["content-length"], str(len(BIN)))
+        self.assertIn('filename="logo.png"', hd["content-disposition"])
+        self.assertEqual(self.fake.streams, ["/repos/johnshorttn/nullink/git/blobs/" + "7" * 40])
+        self.assertNotIn(TOKEN.encode(), raw)
+        self.assertIn('"event": "download"', self.audit_text())
+        self.assertNotIn(TOKEN, self.audit_text())
+
+    def test_single_errors(self):
+        self.assertEqual(self.g("/api/gh/download?repo=johnshorttn/nullink&ref=main&path=big.bin")[2]["error"], "file_too_large")
+        self.assertEqual(self.g("/api/gh/download?repo=johnshorttn/nullink&ref=main&path=docs")[0], 400)
+        self.assertEqual(self.g("/api/gh/download?repo=johnshorttn/nullink&ref=main&path=../x")[0], 400)
+
+    def test_no_stepup_but_owner_only(self):
+        self.age_stepup()
+        self.assertEqual(self.g("/api/gh/download?repo=johnshorttn/nullink&ref=main&path=img/logo.png")[0], 200)
+        self.assertEqual(self.req("/api/gh/download?repo=a/b&ref=main&path=x")[0], 401)
+        self.assertEqual(self.req("/api/gh/zip?repo=a/b&ref=main&paths=x", headers={"Authorization": "Bearer nlk_x"})[0], 403)
+
+    def test_zip_folder_and_files(self):
+        st, hd, _, raw = self.g("/api/gh/zip?repo=johnshorttn/nullink&ref=main&paths=docs,README.md,img/logo.png")
+        self.assertEqual(st, 200)
+        hd = {k.lower(): v for k, v in hd}
+        self.assertEqual(hd["content-type"], "application/zip")
+        self.assertIn('filename="nullink.zip"', hd["content-disposition"])
+        z = zipfile.ZipFile(io.BytesIO(raw))
+        self.assertIsNone(z.testzip())
+        names = set(z.namelist())
+        self.assertEqual(names, {"docs/", "docs/sub/", "docs/a.md", "docs/sub/run.sh", "README.md", "img/logo.png"})
+        self.assertEqual(z.read("img/logo.png"), BIN)
+        self.assertEqual(z.read("docs/sub/run.sh"), b"#!\n")
+        self.assertEqual(z.getinfo("docs/sub/run.sh").external_attr >> 16, 0o100755)
+        tr = [c for c in self.fake.calls if "/git/trees/" in c[1]][0]
+        self.assertEqual((tr[1], tr[3]), ("/repos/johnshorttn/nullink/git/trees/main", {"recursive": "1"}))
+        self.assertIn('"event": "zip"', self.audit_text())
+
+    def test_zip_single_folder_name(self):
+        st, hd, _, raw = self.g("/api/gh/zip?repo=johnshorttn/nullink&ref=main&paths=docs/sub")
+        self.assertEqual(st, 200)
+        self.assertIn('filename="sub.zip"', dict((k.lower(), v) for k, v in hd)["content-disposition"])
+        self.assertEqual(set(zipfile.ZipFile(io.BytesIO(raw)).namelist()), {"docs/sub/", "docs/sub/run.sh"})
+
+    def test_zip_limits_and_errors(self):
+        base = "/api/gh/zip?repo=johnshorttn/nullink&ref=main&paths="
+        self.assertEqual(self.g(base)[2]["error"], "nothing_selected")
+        self.assertEqual(self.g(base + "nope")[0], 404)
+        self.assertEqual(self.g(base + "../etc")[0], 400)
+        self.assertEqual(self.g(base + ",".join(f"f{i}" for i in range(GH.ZIP_MAX_PATHS + 1)))[2]["error"], "too_many_selected")
+        with patch.object(GH, "ZIP_MAX_FILES", 2):
+            st, _, js, _ = self.g(base + "docs,README.md")
+            self.assertEqual((st, js["error"]), (413, "too_many_files"))
+        with patch.object(GH, "ZIP_MAX_BYTES", 100):
+            self.assertEqual(self.g(base + "img/logo.png")[2]["error"], "zip_too_large")
+        self.fake.remaining = 10
+        st, _, js, _ = self.g(base + "README.md")
+        self.assertEqual((st, js["error"]), (429, "rate_limited"))
+        self.fake.remaining = 5000
+        self.fake.truncated = True
+        self.assertEqual(self.g(base + "README.md")[2]["error"], "repo_too_large")
+        self.assertEqual(self.fake.streams, [])
