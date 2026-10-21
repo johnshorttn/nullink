@@ -3094,7 +3094,8 @@ btnSplit.addEventListener("click", () => {
     vaultEditorEmpty.classList.add("hidden");
     vaultEditorWrap.classList.remove("hidden");
     if (vaultTitleInput) vaultTitleInput.value = item.title || "";
-    if (vaultTagsInput) vaultTagsInput.value = (item.tags || []).join(", ");
+    setEntryTags(item.tags || []);
+    if (vaultTagEntry) vaultTagEntry.value = "";
     vaultLocked = !!item.locked;
     if (vaultBodyInput) {
       vaultBodyInput.value = item.body || "";
@@ -3127,7 +3128,16 @@ btnSplit.addEventListener("click", () => {
       title.textContent = it.title || "(untitled)";
       const tags = document.createElement("div");
       tags.className = "vault-item-tags";
-      tags.textContent = (it.tags || []).join(", ") || "no tags";
+      if ((it.tags || []).length) {
+        it.tags.forEach((t) => {
+          const c = document.createElement("span");
+          c.className = "vault-chip mini";
+          c.textContent = t;
+          tags.appendChild(c);
+        });
+      } else {
+        tags.textContent = "no labels";
+      }
       li.appendChild(title);
       li.appendChild(tags);
       li.addEventListener("click", () => openVaultItem(it.id));
@@ -3138,12 +3148,157 @@ btnSplit.addEventListener("click", () => {
   async function loadVaultList(q) {
     try {
       const query = q != null ? q : (vaultSearch ? vaultSearch.value.trim() : "");
-      const url = query ? `/api/vault?q=${encodeURIComponent(query)}` : "/api/vault";
+      const params = new URLSearchParams();
+      if (query) params.set("q", query);
+      vaultLabelFilter.forEach((l) => params.append("label", l));
+      const qsx = params.toString();
+      const url = qsx ? `/api/vault?${qsx}` : "/api/vault";
       const r = await fetch(url, { credentials: "include" });
       if (r.status === 401) return showAuth();
       const d = await r.json();
       renderVaultList(d.items || []);
+      if (Array.isArray(d.labels)) renderVaultLabels(d.labels);
     } catch (_) {}
+  }
+
+  // ---- Searchable labels (2026-10-21): filter chips with counts, chip editor, autocomplete ----
+  const vaultLabelsEl = document.getElementById("vault-labels");
+  const vaultTagChips = document.getElementById("vault-tag-chips");
+  const vaultTagEntry = document.getElementById("vault-tag-entry");
+  const vaultLabelOptions = document.getElementById("vault-label-options");
+  let vaultLabelFilter = [];
+  let vaultAllLabels = [];
+
+  function renderVaultLabels(list) {
+    vaultAllLabels = list || [];
+    const known = new Set(vaultAllLabels.map((l) => l.name.toLowerCase()));
+    vaultLabelFilter = vaultLabelFilter.filter((l) => known.has(l.toLowerCase()));
+    if (vaultLabelOptions) {
+      vaultLabelOptions.innerHTML = "";
+      vaultAllLabels.forEach((l) => {
+        const o = document.createElement("option");
+        o.value = l.name;
+        vaultLabelOptions.appendChild(o);
+      });
+    }
+    if (!vaultLabelsEl) return;
+    vaultLabelsEl.innerHTML = "";
+    vaultLabelsEl.classList.toggle("hidden", !vaultAllLabels.length);
+    vaultAllLabels.forEach((l) => {
+      const on = vaultLabelFilter.some((x) => x.toLowerCase() === l.name.toLowerCase());
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "vault-chip filter" + (on ? " on" : "");
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+      b.title = "Filter by label (tap again to clear). Long-press or right-click to rename/remove.";
+      b.textContent = l.name + " ";
+      const n = document.createElement("span");
+      n.className = "count";
+      n.textContent = String(l.count);
+      b.appendChild(n);
+      b.addEventListener("click", () => {
+        if (b._lp) { b._lp = false; return; }
+        vaultLabelFilter = on ? vaultLabelFilter.filter((x) => x.toLowerCase() !== l.name.toLowerCase())
+          : vaultLabelFilter.concat([l.name]);
+        loadVaultList();
+      });
+      b.addEventListener("contextmenu", (e) => { e.preventDefault(); renameVaultLabel(l.name); });
+      let t = null;
+      b.addEventListener("touchstart", () => { t = setTimeout(() => { b._lp = true; renameVaultLabel(l.name); }, 600); }, { passive: true });
+      ["touchend", "touchmove", "touchcancel"].forEach((ev) => b.addEventListener(ev, () => clearTimeout(t), { passive: true }));
+      vaultLabelsEl.appendChild(b);
+    });
+    if (vaultLabelFilter.length) {
+      const c = document.createElement("button");
+      c.type = "button";
+      c.className = "vault-chip clear";
+      c.textContent = "Clear";
+      c.addEventListener("click", () => { vaultLabelFilter = []; loadVaultList(); });
+      vaultLabelsEl.appendChild(c);
+    }
+  }
+
+  async function renameVaultLabel(name) {
+    const to = window.prompt(`Rename label "${name}" on every entry (leave empty to remove it):`, name);
+    if (to === null || to.trim() === name) return;
+    try {
+      const r = await fetch("/api/vault/labels/rename", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: name, to: to.trim() }),
+      });
+      if (r.status === 401) return showAuth();
+      const d = await r.json();
+      if (!r.ok) return showToast(d.error || "Rename failed");
+      vaultLabelFilter = vaultLabelFilter.map((x) => (x.toLowerCase() === name.toLowerCase() ? to.trim() : x)).filter(Boolean);
+      showToast(to.trim() ? `Renamed on ${d.changed} entr${d.changed === 1 ? "y" : "ies"}` : `Removed from ${d.changed}`);
+      await loadVaultList();
+      if (activeVaultId && !vaultDirty) openVaultItem(activeVaultId);
+    } catch (_) {
+      showToast("Network error");
+    }
+  }
+
+  function currentEntryTags() {
+    return parseTags(vaultTagsInput ? vaultTagsInput.value : "");
+  }
+
+  function setEntryTags(tags) {
+    const seen = new Set();
+    const clean = [];
+    (tags || []).forEach((t) => {
+      const s = String(t || "").trim().slice(0, 40);
+      if (!s || seen.has(s.toLowerCase())) return;
+      seen.add(s.toLowerCase());
+      // reuse the existing label's casing so autocomplete keeps labels consistent
+      const ex = vaultAllLabels.find((l) => l.name.toLowerCase() === s.toLowerCase());
+      clean.push(ex ? ex.name : s);
+    });
+    if (vaultTagsInput) vaultTagsInput.value = clean.slice(0, 24).join(", ");
+    if (!vaultTagChips) return;
+    vaultTagChips.innerHTML = "";
+    clean.forEach((t) => {
+      const c = document.createElement("span");
+      c.className = "vault-chip edit";
+      c.textContent = t;
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "x";
+      x.setAttribute("aria-label", `Remove label ${t}`);
+      x.textContent = "×";
+      x.addEventListener("click", () => {
+        setEntryTags(currentEntryTags().filter((y) => y !== t));
+        markVaultDirty();
+      });
+      c.appendChild(x);
+      vaultTagChips.appendChild(c);
+    });
+  }
+
+  function commitTagEntry() {
+    if (!vaultTagEntry) return;
+    const v = vaultTagEntry.value.replace(/,/g, " ").trim();
+    vaultTagEntry.value = "";
+    if (!v) return;
+    setEntryTags(currentEntryTags().concat([v]));
+    markVaultDirty();
+  }
+
+  if (vaultTagEntry) {
+    vaultTagEntry.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === ",") { e.preventDefault(); commitTagEntry(); }
+      else if (e.key === "Backspace" && !vaultTagEntry.value) {
+        const t = currentEntryTags();
+        if (t.length) { setEntryTags(t.slice(0, -1)); markVaultDirty(); }
+      }
+    });
+    vaultTagEntry.addEventListener("input", () => {
+      // datalist pick (exact match to an existing label) or a typed comma commits immediately
+      const v = vaultTagEntry.value;
+      if (v.includes(",") || vaultAllLabels.some((l) => l.name === v)) commitTagEntry();
+    });
+    vaultTagEntry.addEventListener("blur", commitTagEntry);
   }
 
   async function openVaultItem(vid) {
@@ -3178,6 +3333,7 @@ btnSplit.addEventListener("click", () => {
   async function saveVaultSnippet() {
     const title = vaultTitleInput ? vaultTitleInput.value.trim() : "";
     const body = vaultBodyInput ? vaultBodyInput.value : "";
+    commitTagEntry();
     const tags = parseTags(vaultTagsInput ? vaultTagsInput.value : "");
     if (!title && !String(body).trim()) {
       showToast("Title or body required");

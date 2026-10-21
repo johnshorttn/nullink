@@ -2619,9 +2619,49 @@ body.is-guest #guest-audit-btn { display: none !important; }
 .gh-viewer__bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
 .gh-viewer__actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .gh-cm { border: 1px solid var(--border, #2a3142); border-radius: 8px; overflow: auto; min-height: 320px; max-height: 70vh; }
-.gh-cm .cm-editor { min-height: 320px; }
+.gh-cm .cm-editor { min-height: 260px; }
 .gh-branch { max-width: 220px; }
 .gh-editing { color: #ffb86b; font-weight: 600; }
 .gh-msg { width: 100%; box-sizing: border-box; padding: 6px 8px; margin-bottom: 8px; }
 #gh .fm-row { display: flex; justify-content: space-between; gap: 8px; padding: 8px 10px; }
 #gh .fm-row__name { background: none; border: 0; color: inherit; font: inherit; cursor: pointer; text-align: left; padding: 0; }
+
+/* ===== Vault searchable labels (2026-10-21) ===== */
+.vault-labels { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+.vault-labels.hidden { display: none; }
+.vault-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  border-radius: 999px; border: 1px solid var(--color-border, var(--border, #2a3548));
+  background: var(--bg3, #121820); color: var(--text, #e8eefc);
+  font: inherit; font-size: .78rem; line-height: 1; padding: 6px 10px;
+}
+.vault-chip.filter { cursor: pointer; min-height: 32px; -webkit-user-select: none; user-select: none; }
+.vault-chip.filter.on { background: var(--color-brand-soft, #2a3a5c); border-color: var(--color-brand, #6ea8fe); }
+.vault-chip .count { font-size: .7rem; opacity: .7; }
+.vault-chip.clear { cursor: pointer; background: transparent; color: var(--muted, #8b97ad); min-height: 32px; }
+.vault-chip.mini { font-size: .68rem; padding: 2px 7px; margin: 0 4px 2px 0; }
+.vault-item-tags { display: flex; flex-wrap: wrap; }
+.vault-tag-editor {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px;
+  border: 1px solid var(--border, #2a3548); border-radius: 8px; padding: 6px;
+  background: var(--bg3, #121820);
+}
+.vault-tag-chips { display: contents; }
+.vault-chip.edit .x {
+  border: 0; background: transparent; color: inherit; cursor: pointer;
+  font-size: 1rem; line-height: 1; padding: 0 0 0 2px; min-width: 22px; min-height: 22px;
+}
+.vault-field .vault-tag-editor input {
+  flex: 1; min-width: 110px; border: 0 !important; background: transparent !important;
+  padding: 4px !important; outline: none; margin: 0;
+}
+#vault-sidebar:not(.hidden) { display: flex; flex-direction: column; flex: 1 1 0%; min-height: 0; overflow: hidden; }
+#vault-sidebar .vault-labels { flex-shrink: 0; max-height: 72px; overflow-y: auto; }
+#vault-sidebar .vault-list { flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; }
+@media (max-width: 767px) {
+  #vault-sidebar:not(.hidden) { flex: none; min-height: 0; overflow: visible; }
+  #vault-sidebar .vault-list { flex: none; min-height: 0; max-height: none; overflow: visible; }
+  #vault-sidebar .vault-labels { max-height: none; }
+}
+/* keep the chat Labels section from being squashed when the Vault sidebar grows */
+.sidebar-section:has(> #label-chips) { flex: 0 0 auto; }

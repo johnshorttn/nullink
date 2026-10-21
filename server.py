@@ -837,23 +837,85 @@ def load_vault_snippet(vid: str, decrypt: bool = True) -> dict | None:
     return out
 
 
-def list_vault_snippets(query: str | None = None) -> list[dict]:
-    """Masked list. Search matches title and tags only (bodies are encrypted)."""
+def _vault_matches(item: dict, query: str | None, labels: list[str] | None) -> bool:
+    """Title + label search (never the body). Every whitespace token must hit the title or a label
+    (case-insensitive substring); `tag:x` / `label:x` tokens must equal a label. `labels` is an
+    AND filter of exact (case-insensitive) label names."""
+    have = [t.lower() for t in item.get("tags") or []]
+    for want in labels or []:
+        if want.strip().lower() not in have:
+            return False
+    title = str(item.get("title") or "").lower()
+    for tok in (query or "").lower().split():
+        if tok.startswith(("tag:", "label:")):
+            name = tok.split(":", 1)[1]
+            if name and name not in have:
+                return False
+            continue
+        if tok not in title and not any(tok in t for t in have):
+            return False
+    return True
+
+
+def list_vault_snippets(query: str | None = None, labels: list[str] | None = None) -> list[dict]:
+    """Masked list. Search matches title and labels only (bodies are encrypted, never indexed)."""
     ensure_dirs()
-    q = (query or "").strip().lower()
     items: list[dict] = []
     try:
         for fp in sorted(VAULT_DIR.glob("*.json")):
             item = load_vault_snippet(fp.stem, decrypt=False)
             if not item:
                 continue
-            if q and q not in " ".join([item["title"], " ".join(item["tags"])]).lower():
+            if not _vault_matches(item, query, labels):
                 continue
             items.append(item)
     except OSError:
         pass
     items.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
     return items
+
+
+def vault_label_counts() -> list[dict]:
+    """[{name, count}] across all entries, case-insensitive merge, most used first. Metadata only."""
+    counts: dict[str, list] = {}
+    for item in list_vault_snippets():
+        for t in item["tags"]:
+            c = counts.setdefault(t.lower(), [t, 0])
+            c[1] += 1
+    out = [{"name": n, "count": c} for n, c in counts.values()]
+    out.sort(key=lambda x: (-x["count"], x["name"].lower()))
+    return out
+
+
+def vault_rename_label(old: str, new: str | None) -> int:
+    """Rename (or remove, when new is empty) a label on every entry. Rewrites plaintext metadata only:
+    the encrypted body blob is left untouched, so no key is needed and nothing is decrypted."""
+    ensure_dirs()
+    old_l = str(old or "").strip().lower()
+    new_s = str(new or "").strip()[:40]
+    if not old_l:
+        return 0
+    changed = 0
+    with _lock:
+        for fp in sorted(VAULT_DIR.glob("*.json")):
+            data = _vault_read_raw(fp.stem)
+            if not data:
+                continue
+            tags = _normalize_vault_tags(data.get("tags"))
+            if old_l not in [t.lower() for t in tags]:
+                continue
+            nt = []
+            for t in tags:
+                nt.append(new_s if t.lower() == old_l else t)
+            data["tags"] = _normalize_vault_tags([t for t in nt if t])
+            data["updated_at"] = iso_now()
+            tmp = VAULT_DIR / f".{fp.stem}.json.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            os.replace(tmp, fp)
+            changed += 1
+    return changed
 
 
 def save_vault_snippet(entry: dict) -> dict:
@@ -4475,8 +4537,15 @@ class Handler(BaseHTTPRequestHandler):
             if not self._vault_owner():
                 return
             q = (qs.get("q") or qs.get("query") or [None])[0]
-            items = list_vault_snippets(q)
-            return self._json(200, {"items": items, "count": len(items), "search": "title_and_tags"})
+            labels = [x for v in (qs.get("label") or []) + (qs.get("tag") or []) for x in v.split(",") if x.strip()]
+            items = list_vault_snippets(q, labels)
+            return self._json(200, {"items": items, "count": len(items), "search": "title_and_tags",
+                                    "labels": vault_label_counts()})
+
+        if path == "/api/vault/labels":
+            if not self._vault_owner():
+                return
+            return self._json(200, {"labels": vault_label_counts()})
 
         m = re.match(r"^/api/vault/([^/]+)$", path)
         if m:
@@ -4641,6 +4710,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._task_create()
         if path == "/api/vault":
             return self._vault_create()
+        if path == "/api/vault/labels/rename":
+            rec = self._vault_owner()
+            if not rec:
+                return
+            body = self._read_json()
+            old = str(body.get("from") or "").strip()
+            if not old:
+                return self._json(400, {"error": "missing_from"})
+            n = vault_rename_label(old, body.get("to"))
+            vault_audit("label_rename" if str(body.get("to") or "").strip() else "label_remove",
+                        entries=n, ip=client_ip(self), session=rec.get("id"))
+            return self._json(200, {"ok": True, "changed": n, "labels": vault_label_counts()})
         if path == "/api/selection/label":
             return self._selection_label()
 
