@@ -32,8 +32,10 @@
   function pick(drive) {
     const server = drive === "server";
     sw.querySelectorAll(".drive-tab").forEach((b) => { const on = b.dataset.drive === drive; b.classList.toggle("is-active", on); b.setAttribute("aria-selected", on); });
-    sd.hidden = !server; fm.hidden = server;
+    const gh = $("gh");
+    sd.hidden = !server; fm.hidden = drive !== "files"; if (gh) gh.hidden = drive !== "github";
     if (server) init();
+    document.dispatchEvent(new CustomEvent("nl:drive", { detail: drive }));
   }
   sw.addEventListener("click", (e) => { const b = e.target.closest(".drive-tab"); if (b) pick(b.dataset.drive); });
 

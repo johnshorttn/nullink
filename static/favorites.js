@@ -54,6 +54,7 @@
   function open(it) {
     if (NL().setMode) NL().setMode("files");
     if (it.drive === "server") { window.NLServerDrive && window.NLServerDrive.open(it.path); return; }
+    if (it.drive === "github") { window.NLGitHub && window.NLGitHub.open(it.path); return; }
     window.NLServerDrive && window.NLServerDrive.pick("files");
     window.NLFiles && window.NLFiles.go(it.path);
   }
@@ -88,9 +89,9 @@
       li.draggable = true;
       const handle = el("span", "fav-handle", "⋮⋮");
       handle.title = "Drag to reorder";
-      const b = el("button", "fav-open", (it.drive === "server" ? "🖥 " : "📁 ") + it.label);
+      const b = el("button", "fav-open", (it.drive === "server" ? "🖥 " : it.drive === "github" ? "🐙 " : "📁 ") + it.label);
       b.type = "button";
-      b.title = (it.drive === "server" ? "Server " : "Files /") + it.path;
+      b.title = (it.drive === "server" ? "Server " : it.drive === "github" ? "GitHub " : "Files /") + it.path;
       b.addEventListener("click", () => open(it));
       const rn = el("button", "ghost tiny fav-act", "✎"); rn.type = "button"; rn.title = "Rename"; rn.setAttribute("aria-label", "Rename " + it.label);
       rn.addEventListener("click", () => rename(it));

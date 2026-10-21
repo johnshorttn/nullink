@@ -4,13 +4,14 @@ gate (no guests, no Bearer/agent tokens) already applies. Opening a Server-drive
 still goes through /api/sd/list, which enforces the 15-minute unlock."""
 import json
 import os
+import re
 import secrets
 import threading
 import time
 
 import server as S
 
-DRIVES = ("files", "server")
+DRIVES = ("files", "server", "github")
 MAX_FAVORITES = 100
 MAX_LABEL = 80
 OWNER_KEY = "owner"  # Nullink has a single owner account
@@ -49,6 +50,10 @@ def _label(raw, path) -> str:
     if s:
         return s
     leaf = path.rstrip("/").rsplit("/", 1)[-1]
+    if ":" in path and "@" in path:
+        repo, rest = path.split("@", 1)
+        sub = rest.split(":", 1)[1]
+        return (sub.rsplit("/", 1)[-1] if sub else repo.split("/")[-1])[:MAX_LABEL]
     return leaf or ("Server /" if path == "/" else "Files")
 
 
@@ -62,6 +67,15 @@ def _norm(drive: str, raw) -> str:
         if folder and folder not in FM.load_folders():
             raise FavErr(404, "not_found")
         return folder
+    if drive == "github":
+        import github_drive as GH
+        m = re.match(r"^([^@:]+)@([^:]+):(.*)$", str(raw or ""))
+        if not m:
+            raise FavErr(400, "bad_path")
+        try:
+            return f"{GH._repo(m.group(1))}@{GH._ref(m.group(2))}:{GH._path(m.group(3))}"
+        except GH.GhErr:
+            raise FavErr(400, "bad_path")
     try:
         rel = SD.norm_rel(raw)
     except Exception:
