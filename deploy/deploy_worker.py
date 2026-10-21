@@ -33,7 +33,13 @@ def run(args: list[str], cwd: Path | None = None, check: bool = True) -> subproc
 
 
 def git(repo_path: Path, *args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return run(["/usr/bin/git", *args], cwd=cwd or repo_path, check=check)
+    # The hook runs as root while the checkout is owned by the service user;
+    # trust only this configured repo path (avoids git "dubious ownership").
+    return run(
+        ["/usr/bin/git", "-c", f"safe.directory={repo_path}", *args],
+        cwd=cwd or repo_path,
+        check=check,
+    )
 
 
 def health_ok(check: dict, attempts: int = 15) -> bool:
