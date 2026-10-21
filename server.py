@@ -1293,6 +1293,12 @@ def _session_sig(sid: str) -> str:
     return hmac.new(session_secret(), b"nullink-session-v2." + sid.encode(), hashlib.sha256).hexdigest()
 
 
+def file_version(fp) -> dict:
+    """Content hash + mtime used by the editor's changed-since-open check."""
+    data = Path(fp).read_bytes()
+    return {"sha256": hashlib.sha256(data).hexdigest(), "mtime_ns": Path(fp).stat().st_mtime_ns}
+
+
 def load_sessions() -> dict:
     with _auth_lock:
         try:
@@ -4075,6 +4081,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("app.js", "application/javascript; charset=utf-8")
         if path == "/files-manager.js":
             return self._serve_static("files-manager.js", "application/javascript; charset=utf-8")
+        if path in ("/editor.js", "/sanitize.js"):
+            return self._serve_static(path[1:], "application/javascript; charset=utf-8")
+        if path == "/vendor/codemirror/codemirror.bundle.js":
+            return self._serve_static("vendor/codemirror/codemirror.bundle.js", "application/javascript; charset=utf-8")
+        if path == "/vendor/codemirror/LICENSE.txt":
+            return self._serve_static("vendor/codemirror/LICENSE.txt", "text/plain; charset=utf-8")
         if path == "/favorites.js":
             return self._serve_static("favorites.js", "application/javascript; charset=utf-8")
         if path == "/server-drive.js":
@@ -5230,6 +5242,7 @@ class Handler(BaseHTTPRequestHandler):
             "content": text,
             "labels": entry.get("labels") or [],
             "updated_at": entry.get("updated_at"),
+            **file_version(fp),
         })
 
     def _file_download(self, fid: str) -> None:
@@ -5330,18 +5343,29 @@ class Handler(BaseHTTPRequestHandler):
             }
             files.append(entry)
             save_files(files)
-            return self._json(200, {"ok": True, "file": entry})
+            return self._json(200, {"ok": True, "file": entry, **file_version(dest)})
 
         fp = resolve_file_path(entry)
         if not fp:
             return self._json(404, {"error": "missing_file"})
         if not is_text_file(entry.get("name") or fp.name):
             return self._json(400, {"error": "not_text"})
+        # Changed-since-open check: the editor sends the sha256/mtime it opened;
+        # a mismatch means someone else wrote the file -> 409 unless force=true.
+        base_sha = body.get("base_sha256")
+        base_mtime = body.get("base_mtime_ns")
+        if (base_sha or base_mtime) and not body.get("force"):
+            cur = file_version(fp)
+            changed = (base_sha and str(base_sha) != cur["sha256"]) or (
+                not base_sha and str(base_mtime) != str(cur["mtime_ns"]))
+            if changed:
+                return self._json(409, {"error": "conflict", "message":
+                                        "File changed since you opened it.", **cur})
         fp.write_text(content, encoding="utf-8")
         entry["size"] = fp.stat().st_size
         entry["updated_at"] = iso_now()
         save_files(files)
-        return self._json(200, {"ok": True, "file": entry})
+        return self._json(200, {"ok": True, "file": entry, **file_version(fp)})
 
     def _file_upload(self) -> None:
         if not self._require_auth():

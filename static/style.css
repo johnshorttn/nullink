@@ -2554,3 +2554,50 @@ body.is-guest #guest-audit-btn { display: none !important; }
 .fav-strip .fav-open { font-size: 14px; padding: 8px 4px; }
 .fav-strip .fav-act, .fav-strip .fav-handle { min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; }
 @media (max-width: 720px) { .fav-strip:not([hidden]) { display: block; } }
+
+/* ---- Advanced editor (ed1): CodeMirror 6 code layout, WYSIWYG, sandboxed preview ---- */
+.editor-wrap.ed-on:not(.hidden) { display: flex; flex-direction: column; }
+.ed-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 6px 10px;
+  border-bottom: 1px solid var(--color-border, var(--border)); background: var(--color-surface, var(--bg2)); }
+.ed-mode { font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 8px; background: var(--color-bg, var(--bg));
+  color: var(--color-text, var(--text)); border: 1px solid var(--color-border, var(--border)); }
+.ed-group { display: inline-flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+.ed-group + .ed-group { padding-left: 6px; border-left: 1px solid var(--color-border, var(--border)); }
+.ed-btn { min-height: 30px; min-width: 30px; padding: 2px 8px; font-size: 12px; }
+.ed-btn.is-on { background: var(--accent-soft, rgba(75,139,245,.18)); border-color: var(--accent, #4b8bf5); }
+.ed-btn.ed-accent { border-color: var(--accent, #4b8bf5); color: var(--accent, #4b8bf5); }
+.ed-btn[disabled] { opacity: .4; }
+.ed-b { font-weight: 700; } .ed-i { font-style: italic; } .ed-u { text-decoration: underline; } .ed-s { text-decoration: line-through; }
+.ed-note { font-size: 12px; margin-left: auto; }
+.ed-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr; overflow: hidden; }
+.editor-wrap[data-ed-layout="split"] .ed-body { grid-template-columns: 1fr 1fr; }
+.ed-cm, .ed-wys, .ed-prev { min-height: 0; min-width: 0; height: 100%; }
+.ed-cm[hidden], .ed-wys[hidden], .ed-prev[hidden] { display: none; }
+.ed-cm .cm-editor { height: 100%; font-size: 13px; }
+.ed-cm .cm-scroller { font-family: var(--font-mono, var(--mono)); line-height: 1.55; }
+.ed-cm .cm-editor.cm-focused { outline: none; }
+.ed-cm .cm-panels { font-size: 13px; }
+.ed-cm .cm-panel.cm-search input, .ed-cm .cm-panel.cm-search button { font-size: 13px; min-height: 28px; }
+.ed-wys { overflow: auto; padding: 16px 22px; background: #fff; color: #111; font: 15px/1.6 system-ui, sans-serif; outline: none; }
+.ed-wys.ed-nowrap { white-space: normal; }
+.ed-wys img { max-width: 100%; }
+.ed-wys table { border-collapse: collapse; margin: 8px 0; }
+.ed-wys td, .ed-wys th { border: 1px solid #bbb; padding: 4px 8px; min-width: 40px; }
+.ed-wys blockquote { border-left: 3px solid #ccc; margin-left: 0; padding-left: 12px; color: #444; }
+.ed-wys a { color: #1a62d6; }
+.ed-prev { border: 0; border-left: 1px solid var(--color-border, var(--border)); background: #0f1115; width: 100%; }
+@media (max-width: 720px) {
+  .ed-bar { padding: 6px; gap: 4px; }
+  .ed-btn { min-height: 36px; min-width: 36px; }
+  .ed-note { display: none; }
+  .editor-wrap[data-ed-layout="split"] .ed-body { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+  .ed-prev { border-left: 0; border-top: 1px solid var(--color-border, var(--border)); }
+  .ed-cm .cm-editor { font-size: 14px; }
+}
+/* Fix (ed1): Fluid Slice 4's unconditional `.nl-shell__roster.sidebar { position: relative }` overrode the
+   phone drawer's `position: fixed`, so on Pixel widths the hidden drawer still took the top half of the
+   grid and pushed the main panel (chat/files/editor) into the bottom half. Restore the overlay drawer. */
+@media (max-width: 767px) {
+  .nl-shell__roster.sidebar { position: fixed; }
+}
+#panel-files.fm-editing > .fav-strip { display: none !important; }
