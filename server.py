@@ -4081,6 +4081,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("app.js", "application/javascript; charset=utf-8")
         if path == "/files-manager.js":
             return self._serve_static("files-manager.js", "application/javascript; charset=utf-8")
+        if path in ("/editor.js", "/sanitize.js"):
+            return self._serve_static(path[1:], "application/javascript; charset=utf-8")
+        if path == "/vendor/codemirror/codemirror.bundle.js":
+            return self._serve_static("vendor/codemirror/codemirror.bundle.js", "application/javascript; charset=utf-8")
+        if path == "/vendor/codemirror/LICENSE.txt":
+            return self._serve_static("vendor/codemirror/LICENSE.txt", "text/plain; charset=utf-8")
         if path == "/favorites.js":
             return self._serve_static("favorites.js", "application/javascript; charset=utf-8")
         if path == "/server-drive.js":

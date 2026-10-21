@@ -13,3 +13,4 @@ export { yaml } from "@codemirror/lang-yaml";
 export { xml } from "@codemirror/lang-xml";
 export { shell } from "@codemirror/legacy-modes/mode/shell";
 export { oneDark } from "@codemirror/theme-one-dark";
+export { marked } from "marked";

@@ -1877,15 +1877,20 @@ btnSplit.addEventListener("click", () => {
         return;
       }
       showEditor(d.name || f.name, d.content || "", f.id);
+      editorVersion = d.sha256 || null;
     } catch {
       alert("Failed to load file");
     }
   }
 
+  // Changed-since-open check (ed1): sha256 of the file as it was when opened / last saved.
+  let editorVersion = null;
+
   function showEditor(name, content, fileId) {
     document.dispatchEvent(new CustomEvent("nl:editor-open", { detail: { fileId: fileId || null } }));
     editorOpen = true;
     activeFileId = fileId || null;
+    editorVersion = null;
     savedContent = content;
     editor.value = content;
     editorFilename.textContent = name || "untitled.txt";
@@ -1953,24 +1958,43 @@ btnSplit.addEventListener("click", () => {
       content: editor.value,
       name: editorFilename.textContent,
     };
-    if (activeFileId) body.id = activeFileId;
-    else {
+    if (activeFileId) {
+      body.id = activeFileId;
+      if (editorVersion) body.base_sha256 = editorVersion;
+    } else {
       const labs = labelFilterSet.size ? [...labelFilterSet] : ["inbox"];
       body.labels = labs;
     }
-    const r = await fetch("/api/files/save", {
+    const post = () => fetch("/api/files/save", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    let r = await post();
     if (r.status === 401) return showAuth();
+    if (r.status === 409) {
+      const overwrite = confirm("This file changed on the server since you opened it.\n\n" +
+        "OK: overwrite it with your version.\nCancel: choose whether to reload the server version.");
+      if (overwrite) {
+        body.force = true;
+        r = await post();
+      } else {
+        if (confirm("Reload the server version? Your unsaved edits will be discarded.\n\nCancel keeps editing (nothing is saved).")) {
+          const keepId = activeFileId;
+          await openFile({ id: keepId, name: editorFilename.textContent });
+          setScratchStatus("Reloaded the server version.");
+        }
+        return;
+      }
+    }
     const d = await r.json();
     if (!r.ok) {
       alert(d.message || d.error || "Save failed");
       return;
     }
     activeFileId = d.file.id;
+    editorVersion = d.sha256 || null;
     savedContent = editor.value;
     editorFilename.textContent = d.file.name;
     btnDownload.disabled = false;
@@ -3223,7 +3247,8 @@ btnSplit.addEventListener("click", () => {
 
 
   // Files manager (static/files-manager.js) reuses the editor, Ask Morc and step-up flow.
-  window.NL = Object.assign(window.NL || {}, { openFile, loadFiles, stepUpFetch, setMode, showAuth });
+  window.NL = Object.assign(window.NL || {}, { openFile, loadFiles, stepUpFetch, setMode, showAuth, saveFile,
+    isEditorDirty: () => editorOpen && editor.value !== savedContent });
 
   checkAuth();
 })();
