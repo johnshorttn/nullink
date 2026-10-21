@@ -99,6 +99,7 @@
       dropTarget(b, path);
       els.crumbs.appendChild(b);
     });
+    if (window.NLFav) els.crumbs.appendChild(window.NLFav.star("files", state.cwd));
   }
 
   function children(folder) {
@@ -124,6 +125,7 @@
       name.addEventListener("click", () => go(folder));
       dropTarget(row, folder);
       row.append(tw, name);
+      if (window.NLFav) row.appendChild(window.NLFav.star("files", folder));
       li.appendChild(row);
       if (kids.length && state.open.has(folder)) {
         const sub = el("ul", "fm-tree__list");
@@ -472,4 +474,5 @@
   document.addEventListener("nl:files-loaded", refresh);
 
   window.NLFiles = { refresh, go, state };
+  window.NLFiles = { go, rerender: () => render(), cwd: () => state.cwd };
 })();

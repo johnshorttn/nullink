@@ -4075,6 +4075,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("app.js", "application/javascript; charset=utf-8")
         if path == "/files-manager.js":
             return self._serve_static("files-manager.js", "application/javascript; charset=utf-8")
+        if path == "/favorites.js":
+            return self._serve_static("favorites.js", "application/javascript; charset=utf-8")
         if path == "/server-drive.js":
             return self._serve_static("server-drive.js", "application/javascript; charset=utf-8")
         if path == "/vendor/socket.io.min.js":
