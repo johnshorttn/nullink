@@ -6605,6 +6605,8 @@ def main() -> None:
         print(f"ensure_chatgpt_playground_label: {exc}", flush=True)
     try:
         print(f"files_manager.migrate: {files_manager.migrate()}", flush=True)
+        import fm_uploads
+        print(f"fm_uploads.cleanup_stale: {fm_uploads.cleanup_stale()}", flush=True)
     except Exception as exc:
         print(f"files_manager.migrate: {exc}", flush=True)
     if MESSAGES_FILE.stat().st_size == 0:
