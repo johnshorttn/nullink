@@ -227,6 +227,9 @@ def _route(h, method, path, qs) -> bool:
     import fm_uploads
     if fm_uploads.route(h, method, path, qs):
         return True
+    import fm_search
+    if fm_search.route(h, method, path, qs):
+        return True
     m = re.match(r"^/api/fm/files/([A-Za-z0-9_-]{1,64})(/download|/content|/preview)?$", path)
     if m and method == "GET":
         fid, sub = m.group(1), m.group(2) or ""

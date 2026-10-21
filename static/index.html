@@ -313,6 +313,9 @@
           <section id="fm" class="fm" aria-label="File manager">
             <header class="fm-bar">
               <nav id="fm-crumbs" class="fm-crumbs" aria-label="Current folder"></nav>
+              <form id="fm-search-form" class="fm-search" role="search">
+                <input id="fm-search" type="search" placeholder="Search files and contents" aria-label="Search files" maxlength="200" autocomplete="off" />
+              </form>
               <div class="fm-actions">
                 <label class="ghost toolbar-btn fm-upload" title="Upload files">Upload<input type="file" id="fm-upload-input" multiple hidden /></label>
                 <button type="button" id="fm-new-folder" class="ghost toolbar-btn">New folder</button>
@@ -634,7 +637,7 @@
   <script src="/guest.js?v=g4"></script>
   <script src="/sanitize.js?v=ed1"></script>
   <script src="/favorites.js?v=fav1"></script>
-  <script src="/files-manager.js?v=fm3"></script>
+  <script src="/files-manager.js?v=fm4"></script>
   <script src="/server-drive.js?v=sd2"></script>
   <script type="module" src="/editor.js?v=ed1"></script>
   <div id="apps-fs-chrome" class="apps-fs-chrome hidden"><button type="button" id="btn-apps-exit-fs-floating" class="accent-btn toolbar-btn">Exit full screen</button></div>

@@ -2601,3 +2601,15 @@ body.is-guest #guest-audit-btn { display: none !important; }
   .nl-shell__roster.sidebar { position: fixed; }
 }
 #panel-files.fm-editing > .fav-strip { display: none !important; }
+
+/* Files search + share (2026-10-21) */
+.fm-search { flex: 1 1 220px; min-width: 160px; max-width: 420px; margin: 0 8px; }
+.fm-search input { width: 100%; box-sizing: border-box; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border, #2a3142); background: var(--surface-2, #121722); color: inherit; }
+.fm-row--search { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 8px 10px; }
+.fm-row--search .fm-row__name { background: none; border: 0; color: inherit; font: inherit; font-weight: 600; cursor: pointer; padding: 0; text-align: left; }
+.fm-snippet { flex-basis: 100%; font-family: ui-monospace, monospace; font-size: 12px; opacity: .75; white-space: pre-wrap; word-break: break-word; }
+.fm-share { display: grid; gap: 10px; min-width: min(460px, 80vw); }
+.fm-share-row { display: flex; gap: 8px; }
+.fm-share-url { width: 100%; box-sizing: border-box; padding: 6px 8px; }
+.fm-share-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; font-size: 13px; }
+.fm-share-item { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; }
