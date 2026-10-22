@@ -2690,6 +2690,15 @@ btnSplit.addEventListener("click", () => {
       if (msg.replit.resolved) replitResolved.add(msg.replit.resolved);
     }
     wrap.appendChild(meta);
+    wrap.className = "bubble-col";
+    const AV = window.NullinkAvatars;
+    if (AV) {
+      const who = AV.senderFor(msg, chatTitle && chatTitle.textContent);
+      row.dataset.sender = AV.keyFor(who);
+      const prev = messagesEl.lastElementChild;
+      if (prev && prev.classList.contains("bubble-row") && prev.dataset.sender === row.dataset.sender) row.classList.add("cont");
+      row.appendChild(AV.el(who));
+    }
     row.appendChild(wrap);
     messagesEl.appendChild(row);
     if (searchQuery.trim()) {
@@ -2712,6 +2721,7 @@ btnSplit.addEventListener("click", () => {
   }
 
   async function fetchMessages(scrollForce) {
+    if (window.NullinkAvatars) window.NullinkAvatars.load();
     try {
       const r = await fetch(
         `/api/messages?session=${encodeURIComponent(activeSession)}&after=${lastId}`,

@@ -29,6 +29,7 @@ import files_manager
 import server_drive
 import github_drive
 import ai_rooms
+import avatars
 
 from phone_bridge import PhoneBridgeError, get_bridge
 
@@ -4060,6 +4061,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not_found"})
         if self._guest_gate("GET", path):
             return
+        if path.startswith("/api/avatars") and avatars.handle(self, "GET", path):
+            return
         if path.startswith("/api/fm") and files_manager.handle(self, "GET", path, qs):
             return
         if path.startswith("/api/sd") and server_drive.handle(self, "GET", path, qs):
@@ -4158,6 +4161,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("vendor/codemirror/codemirror.bundle.js", "application/javascript; charset=utf-8")
         if path == "/vendor/codemirror/LICENSE.txt":
             return self._serve_static("vendor/codemirror/LICENSE.txt", "text/plain; charset=utf-8")
+        if path == "/avatars.js":
+            return self._serve_static("avatars.js", "application/javascript; charset=utf-8")
         if path == "/favorites.js":
             return self._serve_static("favorites.js", "application/javascript; charset=utf-8")
         if path == "/server-drive.js":
@@ -4576,6 +4581,8 @@ class Handler(BaseHTTPRequestHandler):
                 self, "POST", path, urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)):
             return
         if self._guest_gate("POST", path):
+            return
+        if path.startswith("/api/avatars") and avatars.handle(self, "POST", path):
             return
         if path.startswith("/api/fm") and files_manager.handle(
                 self, "POST", path, urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)):
