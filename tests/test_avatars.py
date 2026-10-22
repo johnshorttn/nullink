@@ -57,7 +57,7 @@ class AvatarHelpersTests(unittest.TestCase):
         names = ["John", "Morc", "Chief of Staff (Morc)", "[Jinx]", "Claude", "Replit", "Claude Code", "deepseek", "X", ""]
         script = (f"const a=require({json.dumps(JS)});const n={json.dumps(names)};"
                   "console.log(JSON.stringify(n.map(x=>[a.keyFor(x),a.initials(x),a.hueFor(x)])))")
-        out = json.loads(subprocess.check_output(["node", "-e", script], timeout=20))
+        out = json.loads(subprocess.check_output(["node", "--jitless", "-e", script], timeout=20))
         self.assertEqual(out, [[avatars.key_for(x), avatars.initials(x), avatars.hue_for(x)] for x in names])
 
     @unittest.skipUnless(shutil.which("node"), "node not installed")
@@ -69,7 +69,7 @@ class AvatarHelpersTests(unittest.TestCase):
                  ({"role": "assistant", "text": "[not a tag] x"}, "Replit", "Replit")]
         script = (f"const a=require({json.dumps(JS)});const c={json.dumps(cases)};"
                   "console.log(JSON.stringify(c.map(([m,t])=>a.senderFor(m,t))))")
-        out = json.loads(subprocess.check_output(["node", "-e", script], timeout=20))
+        out = json.loads(subprocess.check_output(["node", "--jitless", "-e", script], timeout=20))
         self.assertEqual(out, [c[2] for c in cases])
 
 
