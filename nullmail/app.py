@@ -101,9 +101,9 @@ class Handler(BaseHTTPRequestHandler):
             origin=self.headers.get('Origin')
             if write and (origin not in ORIGINS or origin!=self.expected_origin() or self.headers.get('Sec-Fetch-Site') not in (None,'same-origin')):
                 return self.reply(403,{'error':'Origin rejected'})
-            if not write and path in ('/','/app.js','/workspace.js','/cases.js','/composer.js','/vendor/quill.js','/vendor/quill.snow.css','/style.css'):
-                f={'/':'index.html','/app.js':'app.js','/workspace.js':'workspace.js','/cases.js':'cases.js','/composer.js':'composer.js','/vendor/quill.js':'vendor/quill.js','/vendor/quill.snow.css':'vendor/quill.snow.css','/style.css':'style.css'}[path]
-                return self.reply(200,(STATIC/f).read_bytes(),{'/':'text/html; charset=utf-8','/composer.js':'text/javascript; charset=utf-8','/vendor/quill.js':'text/javascript; charset=utf-8','/vendor/quill.snow.css':'text/css; charset=utf-8','/app.js':'text/javascript; charset=utf-8','/workspace.js':'text/javascript; charset=utf-8','/cases.js':'text/javascript; charset=utf-8','/style.css':'text/css; charset=utf-8'}[path])
+            if not write and path in ('/','/app.js','/workspace.js','/cases.js','/outbound.js','/composer.js','/vendor/quill.js','/vendor/quill.snow.css','/style.css'):
+                f={'/':'index.html','/app.js':'app.js','/workspace.js':'workspace.js','/cases.js':'cases.js','/outbound.js':'outbound.js','/composer.js':'composer.js','/vendor/quill.js':'vendor/quill.js','/vendor/quill.snow.css':'vendor/quill.snow.css','/style.css':'style.css'}[path]
+                return self.reply(200,(STATIC/f).read_bytes(),{'/':'text/html; charset=utf-8','/composer.js':'text/javascript; charset=utf-8','/vendor/quill.js':'text/javascript; charset=utf-8','/vendor/quill.snow.css':'text/css; charset=utf-8','/app.js':'text/javascript; charset=utf-8','/workspace.js':'text/javascript; charset=utf-8','/cases.js':'text/javascript; charset=utf-8','/outbound.js':'text/javascript; charset=utf-8','/style.css':'text/css; charset=utf-8'}[path])
             if not write and path=='/health': return self.reply(200,{'ok':True,'service':'nullmail'})
             if path=='/api/auth/method' and not write:
                 status,body,_=nullink('/api/auth/method');return self.reply(status,body)
@@ -172,6 +172,43 @@ class Handler(BaseHTTPRequestHandler):
         return self.reply(404,{'error':'Not found'})
     def identities(self):
         return [a for p in control({'op':'status'})['projects'] for a in p['aliases']]
+    def provider_trash_check(self,folder,key,target,confirmed):
+        # Deleting a Gmail Sent message also moves it to Gmail Trash, which Gmail empties after 30 days.
+        gmail=getattr(self.server,'gmail',None)
+        if folder=='sent' and target=='trash' and gmail and gmail.reference(key) and confirmed is not True:
+            raise ValueError('Confirm moving this Gmail message to Gmail Trash')
+    def outbound(self,op,data,store,actor):
+        """Bulk outbound delete/restore. drafts: Outbox/Drafts/Sent-audit IDs; messages: Sent folder {folder,id}."""
+        drafts=data.get('drafts') or [];messages=data.get('messages') or []
+        if not isinstance(drafts,list) or not isinstance(messages,list) or len(drafts)+len(messages)>200: raise ValueError('Select up to 200 messages')
+        if not drafts and not messages: raise ValueError('Nothing selected')
+        permanent=data.get('permanent') is True
+        if permanent and data.get('confirm') is not True: raise ValueError('Permanent delete requires confirmation')
+        for key in drafts:
+            if not isinstance(key,str): raise ValueError('Invalid draft ID')
+            store.own_draft(key,actor)
+        for m in messages:
+            if not isinstance(m,dict) or not isinstance(m.get('id'),str) or m.get('folder') not in ('sent','trash'): raise ValueError('Only Sent or Trash messages can be deleted here')
+            api_v1.message(self,m['folder'],m['id'])
+        results=[]
+        for key in drafts:
+            try:
+                if op=='restore': r=self.server.drafts.restore(key)
+                elif permanent: r=self.server.drafts.purge(key,True)
+                else: r=self.server.drafts.trash(key)
+            except (ValueError,FileNotFoundError) as e: r={'id':key,'error':str(e)}
+            results.append(r)
+        if op=='restore' and messages: raise ValueError('Restore Sent messages from Trash with Restore')
+        for m in messages:
+            try:
+                if permanent and m['folder']=='trash': self.server.mail.delete('trash',m['id'],True)
+                elif permanent: raise ValueError('Move the message to Trash before deleting it permanently')
+                else:
+                    self.provider_trash_check(m['folder'],m['id'],'trash',data.get('confirm_provider'))
+                    self.server.mail.move(m['folder'],m['id'],'trash')
+                results.append({'id':m['id'],'status':'deleted' if permanent else 'trashed'})
+            except (ValueError,FileNotFoundError) as e: results.append({'id':m['id'],'error':str(e)})
+        return {'results':results,'ok':sum('error' not in r for r in results),'failed':sum('error' in r for r in results)}
     def write_api(self,path,data):
         if path=='/api/auth/logout':
             status,body,cookie=nullink(path,self.cookie(),b'{}');return self.reply(status,body,extra={'Set-Cookie':cookie} if cookie else None)
@@ -189,7 +226,13 @@ class Handler(BaseHTTPRequestHandler):
             self.server.mail.flag(data['folder'],data['id'],data['read']);return self.reply(200,{'ok':True})
         if path=='/api/message/move':
             api_v1.message(self,data['folder'],data['id'])
+            self.provider_trash_check(data['folder'],data['id'],data['target'],data.get('confirm_provider'))
             self.server.mail.move(data['folder'],data['id'],data['target']);return self.reply(200,{'ok':True})
+        if path=='/api/message/delete':
+            api_v1.message(self,data['folder'],data['id'])
+            self.server.mail.delete(data['folder'],data['id'],data.get('confirm'));return self.reply(200,{'ok':True})
+        if path in ('/api/outbound/delete','/api/outbound/restore'):
+            return self.reply(200,self.outbound(path.rsplit('/',1)[1],data,store,actor))
         if path=='/api/projects':
             api_v1.admin(perm)
             if set(data)!={'label'}: raise ValueError('Only a project label is accepted')
