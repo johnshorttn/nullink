@@ -2729,3 +2729,9 @@ body.is-guest #guest-audit-btn { display: none !important; }
 .bot-form input[type=text], .bot-form input:not([type]) { width: 100%; box-sizing: border-box; }
 .bot-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 @media (max-width: 767px) { .bots-list { grid-template-columns: 1fr; } .bots-page { padding: 8px 10px 90px; } }
+
+/* bots2: hidden senders */
+.bots-toggle { display: inline-flex; gap: 6px; align-items: center; margin: 4px 12px; font-size: 0.9em; }
+.bots-toggle[hidden] { display: none; }
+.bot-card.is-hidden { opacity: 0.6; }
+.bot-hidden-tag { font-size: 0.75em; }

@@ -7,6 +7,7 @@
   const sfetch = (u, o) => (window.NL && window.NL.stepUpFetch ? window.NL.stepUpFetch(u, o) : fetch(u, o));
   let profiles = [];
   let page = null;
+  let showHidden = false;
 
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
@@ -36,16 +37,20 @@
   function render() {
     const list = page.querySelector(".bots-list");
     list.textContent = "";
-    if (!profiles.length) { list.innerHTML = '<p class="hint">No senders yet.</p>'; return; }
-    for (const p of profiles) {
+    const nHidden = profiles.filter((p) => p.hidden).length;
+    const tg = page.querySelector(".bots-toggle");
+    if (tg) { tg.hidden = !nHidden; tg.querySelector(".n").textContent = nHidden; tg.querySelector("input").checked = showHidden; }
+    const shown = profiles.filter((p) => showHidden || !p.hidden);
+    if (!shown.length) { list.innerHTML = '<p class="hint">No senders yet.</p>'; return; }
+    for (const p of shown) {
       const card = document.createElement("li");
-      card.className = "bot-card";
+      card.className = "bot-card" + (p.hidden ? " is-hidden" : "");
       card.dataset.key = p.key;
       const others = profiles.filter((o) => o.key !== p.key);
       const names = [...new Set(p.names || [])].filter((n) => AV() && AV().keyFor(n) !== p.key && !(p.aliases || []).includes(AV().keyFor(n)));
       card.innerHTML = `
         <div class="bot-card-head"><span class="bot-av"></span>
-          <div class="bot-meta"><strong class="bot-name">${esc(p.name)}</strong>
+          <div class="bot-meta"><strong class="bot-name">${esc(p.name)}</strong>${p.hidden ? ' <span class="chip bot-hidden-tag">Hidden</span>' : ""}
             <span class="hint">${esc(p.key)} · ${p.count} message${p.count === 1 ? "" : "s"}</span>
             ${p.aliases && p.aliases.length ? `<span class="bot-aliases">${p.aliases.map((a) => `<span class="chip">${esc(a)} <button type="button" data-unmerge="${esc(a)}" aria-label="Unmerge ${esc(a)}" title="Unmerge">×</button></span>`).join("")}</span>` : ""}
             ${names.length ? `<span class="hint">Also seen as: ${names.map(esc).join(", ")}</span>` : ""}
@@ -57,6 +62,7 @@
           <div class="bot-actions">
             <button type="submit" class="primary">Save</button>
             ${p.url ? '<button type="button" data-act="clear">Remove picture</button>' : ""}
+            ${p.key !== "john" ? `<button type="button" data-act="hide">${p.hidden ? "Unhide" : "Hide"}</button>` : ""}
             <select name="merge" aria-label="Merge into another profile"><option value="">Merge into…</option>
               ${others.map((o) => `<option value="${esc(o.key)}">${esc(o.name)}</option>`).join("")}</select>
           </div>
@@ -79,6 +85,10 @@
       const clr = card.querySelector('[data-act="clear"]');
       if (clr) clr.onclick = async () => {
         try { await post("/api/avatars/set", { key: p.key, name: f.name.value.trim() || p.name, remove_image: true }); await refresh(); } catch (e) { status(e.message, true); }
+      };
+      const hb = card.querySelector('[data-act="hide"]');
+      if (hb) hb.onclick = async () => {
+        try { await post("/api/avatars/hide", { key: p.key, hidden: !p.hidden }); status((p.hidden ? "Unhid " : "Hid ") + p.name + ". Chat history is unchanged."); await refresh(); } catch (e) { status(e.message, true); }
       };
       f.merge.onchange = async () => {
         const into = f.merge.value; if (!into) return;
@@ -110,9 +120,11 @@
       page.setAttribute("aria-label", "Bot profiles");
       page.innerHTML = `<header class="bots-head"><button type="button" class="ghost" data-act="close" aria-label="Back">←</button>
         <h2>Bots</h2><span class="hint">Avatars &amp; names for everyone in your chats</span></header>
+        <label class="bots-toggle" hidden><input type="checkbox"> Show hidden (<span class="n">0</span>)</label>
         <p class="bots-status" role="status" aria-live="polite"></p><ul class="bots-list" role="list"></ul>`;
       document.body.appendChild(page);
       page.querySelector('[data-act="close"]').onclick = close;
+      page.querySelector(".bots-toggle input").onchange = (e) => { showHidden = e.target.checked; render(); };
     }
     page.hidden = false;
     if (location.hash !== "#bots") history.replaceState(null, "", "#bots");
