@@ -2670,3 +2670,62 @@ body.is-guest #guest-audit-btn { display: none !important; }
 @media (max-width: 600px) { .gh-row .gh-dl { min-width: 44px; min-height: 40px; } #gh-selbar .tiny { min-height: 40px; } }
 #gh .fm-row .fm-row__name { flex: 1 1 auto; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gh-viewer[hidden], #gh-list[hidden] { display: none; }
+
+/* ---- Chat avatars (av1) ---- */
+.bubble-row { gap: var(--space-2, 8px); align-items: flex-end; }
+.bubble-row.user { flex-direction: row-reverse; }
+.bubble-col { min-width: 0; display: flex; flex-direction: column; }
+.bubble-row.user .bubble-col { align-items: flex-end; }
+.chat-avatar {
+  --av-size: 36px;
+  flex: 0 0 var(--av-size);
+  width: var(--av-size); height: var(--av-size);
+  border-radius: var(--radius-full, 999px);
+  border: 1px solid var(--color-border, var(--border));
+  padding: 0; margin: 0 0 calc(var(--text-xs, 11px) * 1.5 + var(--space-1, 4px)) 0;
+  display: inline-grid; place-items: center; overflow: hidden;
+  color: #fff; font: 600 calc(var(--av-size) * 0.4)/1 var(--font-sans, system-ui, sans-serif);
+  letter-spacing: 0.02em; cursor: pointer; user-select: none;
+  box-shadow: var(--shadow-sm);
+}
+.chat-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.chat-avatar:focus-visible { outline: 2px solid var(--color-brand, #6ea8fe); outline-offset: 2px; }
+.bubble-row.cont .chat-avatar { visibility: hidden; }
+.bubble-row.cont { margin-top: calc(-1 * var(--space-2, 8px)); }
+.chat-avatar.lg { --av-size: 56px; margin: 0; cursor: default; }
+@media (max-width: 720px) {
+  .chat-avatar { --av-size: 30px; }
+}
+.avatar-editor {
+  border: 1px solid var(--color-border, var(--border)); border-radius: var(--radius-md, 12px);
+  background: var(--color-surface, var(--panel, #1b1f27)); color: inherit;
+  padding: var(--space-4, 16px); width: min(420px, 92vw);
+}
+.avatar-editor::backdrop { background: rgba(0, 0, 0, 0.5); }
+.avatar-editor h3 { margin: 0 0 var(--space-3, 12px); }
+.avatar-editor form > label, .avatar-editor-row label { display: flex; flex-direction: column; gap: var(--space-1, 4px); margin-bottom: var(--space-3, 12px); font-size: var(--text-sm, 13px); }
+.avatar-editor-row { display: flex; gap: var(--space-3, 12px); align-items: center; }
+.avatar-editor-row label { flex: 1; }
+.avatar-editor menu { display: flex; justify-content: flex-end; gap: var(--space-2, 8px); padding: 0; margin: 0; }
+.avatar-editor-msg { color: var(--color-danger, #f87171); font-size: var(--text-sm, 13px); min-height: 1em; }
+
+/* Bots profile page (bots1) */
+.bots-page { position: fixed; inset: 0; z-index: 900; overflow-y: auto; background: var(--color-bg, #0f1115); color: var(--color-fg, #e6e6e6); padding: 12px 16px 80px; }
+.bots-page[hidden] { display: none; }
+.bots-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; position: sticky; top: -12px; background: inherit; padding: 8px 0; }
+.bots-head h2 { margin: 0; font-size: 1.25rem; }
+.bots-status { min-height: 1.2em; margin: 4px 0; }
+.bots-status.bad { color: #ff7b7b; }
+.bots-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.bot-card { border: 1px solid var(--color-border, #2a2f3a); border-radius: 12px; padding: 12px; background: var(--color-surface, #161a22); }
+.bot-card-head { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
+.bot-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.bot-name { font-size: 1.05rem; }
+.bot-aliases { display: flex; gap: 4px; flex-wrap: wrap; }
+.bot-aliases .chip { font-size: .8rem; padding: 1px 6px; border-radius: 10px; background: var(--color-border, #2a2f3a); }
+.bot-aliases .chip button { background: none; border: 0; color: inherit; cursor: pointer; padding: 0 2px; }
+.bot-form { display: grid; gap: 8px; }
+.bot-form label { display: grid; gap: 4px; font-size: .85rem; }
+.bot-form input[type=text], .bot-form input:not([type]) { width: 100%; box-sizing: border-box; }
+.bot-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+@media (max-width: 767px) { .bots-list { grid-template-columns: 1fr; } .bots-page { padding: 8px 10px 90px; } }
