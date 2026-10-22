@@ -109,7 +109,8 @@
     if (/^#/.test(i.bg)) f.color.value = i.bg;
     const msgEl = dlg.querySelector(".avatar-editor-msg");
     async function post(body) {
-      const r = await fetch("/api/avatars/set", {
+      const f2 = window.NL && window.NL.stepUpFetch ? window.NL.stepUpFetch : fetch;
+      const r = await f2("/api/avatars/set", {
         method: "POST", credentials: "include",
         headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });

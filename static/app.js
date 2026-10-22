@@ -613,6 +613,8 @@
       goMode("apps");
     } else if (tool === "vault") {
       goMode("vault");
+    } else if (tool === "bots") {
+      if (window.NullinkBots) window.NullinkBots.open();
     } else if (tool === "mail") {
       goMode("mail");
     } else if (tool === "desktop") {

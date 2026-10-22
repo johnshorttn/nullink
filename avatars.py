@@ -79,11 +79,19 @@ def load() -> dict:
         return {}
 
 
-def save(av: dict) -> None:
+def save(av: dict, seeded=None) -> None:
     f = _file()
     f.parent.mkdir(parents=True, exist_ok=True)
+    if seeded is None:
+        try:
+            seeded = json.loads(f.read_text(encoding="utf-8")).get("seeded") or []
+        except (OSError, ValueError, AttributeError):
+            seeded = []
     tmp = f.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"avatars": av}, indent=2, ensure_ascii=False), encoding="utf-8")
+    doc = {"avatars": av}
+    if seeded:
+        doc["seeded"] = list(seeded)
+    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
     os.chmod(tmp, 0o600)
     os.replace(tmp, f)
 
@@ -99,14 +107,190 @@ def _image_path(key: str, entry: dict):
     return p, IMG_TYPES[m.group(2)]
 
 
+def _aliases(v: dict) -> list:
+    return [a for a in (v.get("aliases") or []) if isinstance(a, str) and a and key_for(a) == a]
+
+
+def resolve(key: str, av: dict | None = None) -> str:
+    """Canonical profile key for a sender key (follows merged aliases)."""
+    av = load() if av is None else av
+    if key in av:
+        return key
+    for k, v in av.items():
+        if key in _aliases(v):
+            return k
+    return key
+
+
 def public_map() -> dict:
     out = {}
-    for k, v in load().items():
+    av = load()
+    for k, v in av.items():
         p, _ = _image_path(k, v)
         e = {"name": str(v.get("name") or k)[:64], "initials": initials(v.get("name") or k)}
         e["color"] = v["color"] if _valid_color(v.get("color")) else None
         e["url"] = f"/api/avatars/img/{k}?v={int(p.stat().st_mtime)}" if p else None
+        e["aliases"] = [a for a in _aliases(v) if a not in av]
         out[k] = e
+    for k in list(out):
+        for a in out[k]["aliases"]:
+            out.setdefault(a, {**out[k], "alias_of": k, "aliases": []})
+    return out
+
+
+# Starter pictures shipped in static/seed-avatars (Morc + Jinx from their Slack profiles).
+SEEDS = {"morc": ("Morc", "morc.png"), "jinx": ("Jinx", "jinx.png")}
+
+
+def seed_defaults(seed_dir=None) -> list:
+    """Add starter avatars once. Never overwrites an existing profile; remembers what it
+    seeded (avatars.json 'seeded') so a removed seed is not re-added."""
+    seed_dir = seed_dir or (S.STATIC / "seed-avatars")
+    done = []
+    with _lock:
+        try:
+            meta = json.loads(_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        seeded = set(meta.get("seeded") or [])
+        av = load()
+        for key, (name, fn) in SEEDS.items():
+            src = seed_dir / fn
+            if key in seeded or resolve(key, av) in av or not src.is_file():
+                continue
+            raw = src.read_bytes()
+            ext = _sniff(raw)
+            if not ext or len(raw) > MAX_BYTES:
+                continue
+            d = _dir()
+            d.mkdir(parents=True, exist_ok=True)
+            fp = d / f"{key}.{ext}"
+            fp.write_bytes(raw)
+            os.chmod(fp, 0o600)
+            av[key] = {"name": name, "image": fp.name}
+            seeded.add(key)
+            done.append(key)
+        if done:
+            save(av, seeded=sorted(seeded))
+    return done
+
+
+def merge(body: dict) -> dict:
+    """Fold sender `from` into profile `into` (e.g. claude-code -> claude)."""
+    into = key_for(body.get("into") or "")
+    frm = key_for(body.get("from") or "")
+    if not into or not frm:
+        raise AvErr(400, "key_required")
+    with _lock:
+        av = load()
+        into = resolve(into, av)
+        frm_c = resolve(frm, av)
+        if frm_c == into:
+            raise AvErr(400, "same_profile")
+        if into not in av:
+            av[into] = {"name": str(body.get("name") or into)[:64]}
+        tgt = av[into]
+        al = set(_aliases(tgt))
+        if frm_c in av:
+            src = av.pop(frm_c)
+            al |= set(_aliases(src))
+            p, _ = _image_path(frm_c, src)
+            if p:
+                if not _image_path(into, tgt)[0]:
+                    ext = p.suffix
+                    np_ = _dir() / f"{into}{ext}"
+                    os.replace(p, np_)
+                    tgt["image"] = np_.name
+                else:
+                    p.unlink()
+            if not _valid_color(tgt.get("color")) and _valid_color(src.get("color")):
+                tgt["color"] = src["color"]
+        al.add(frm_c)
+        al.add(frm)
+        al.discard(into)
+        tgt["aliases"] = sorted(al)[:50]
+        av[into] = tgt
+        save(av)
+    return {"key": into, **public_map()[into]}
+
+
+def unmerge(body: dict) -> None:
+    alias = key_for(body.get("alias") or "")
+    with _lock:
+        av = load()
+        for v in av.values():
+            al = _aliases(v)
+            if alias in al:
+                v["aliases"] = [a for a in al if a != alias]
+                save(av)
+                return
+    raise AvErr(404, "not_found")
+
+
+ROLE_USER = "user"
+_PREFIX = re.compile(r"^\[([A-Za-z0-9_.-]{1,64})\]\s")
+
+
+def sender_of(msg: dict, room_title: str) -> str:
+    """Python twin of senderFor() in static/avatars.js."""
+    if msg.get("from"):
+        return str(msg["from"])
+    m = _PREFIX.match(str(msg.get("text") or ""))
+    if m:
+        return m.group(1)
+    if msg.get("role") == ROLE_USER:
+        return "John"
+    t = str(room_title or "Assistant")
+    p = re.search(r"\(([^()]+)\)\s*$", t)
+    return p.group(1) if p else t
+
+
+_senders_cache = {"key": None, "val": None}
+
+
+def senders() -> list:
+    """Every sender seen in chat history (plus roster bots), grouped by profile."""
+    titles = {b["id"]: b["title"] for b in S.flat_sessions_from_roster(S.load_roster())}
+    try:
+        st = S.MESSAGES_FILE.stat()
+        ck = (st.st_size, st.st_mtime_ns, tuple(sorted(titles.items())))
+    except OSError:
+        ck = None
+    if ck is None or _senders_cache["key"] != ck:
+        seen = {}
+        for sid, t in titles.items():
+            n = sender_of({"role": "assistant", "text": ""}, t)
+            seen.setdefault(key_for(n), {"name": n, "count": 0, "last": None})
+        for msg in (S.read_messages() if ck else []):
+            n = sender_of(msg, titles.get(msg.get("session_id"), msg.get("session_id") or ""))
+            k = key_for(n)
+            if not k:
+                continue
+            e = seen.setdefault(k, {"name": n, "count": 0, "last": None})
+            e["count"] += 1
+            e["last"] = msg.get("ts") or e["last"]
+        _senders_cache.update(key=ck, val=seen)
+    seen = _senders_cache["val"] or {}
+    av = load()
+    pm = public_map()
+    prof = {}
+    for k, e in seen.items():
+        c = resolve(k, av)
+        p = prof.setdefault(c, {"key": c, "names": [], "count": 0, "last": None})
+        p["names"].append(e["name"])
+        p["count"] += e["count"]
+        if e["last"] and (not p["last"] or e["last"] > p["last"]):
+            p["last"] = e["last"]
+    for k in av:
+        prof.setdefault(k, {"key": k, "names": [], "count": 0, "last": None})
+    out = []
+    for c, p in prof.items():
+        m = pm.get(c) or {}
+        p.update(name=m.get("name") or (p["names"][0] if p["names"] else c),
+                 url=m.get("url"), color=m.get("color"), initials=m.get("initials") or initials(p["names"][0] if p["names"] else c),
+                 hue=hue_for(c), aliases=m.get("aliases") or [], configured=c in av)
+        out.append(p)
+    out.sort(key=lambda p: (p["key"] == "john", -p["count"], p["name"].lower()))
     return out
 
 
@@ -140,6 +324,7 @@ def set_avatar(body: dict) -> dict:
             raise AvErr(415, "unsupported_image")  # no SVG: script risk
     with _lock:
         av = load()
+        key = resolve(key, av)
         if key not in av and len(av) >= MAX_ENTRIES:
             raise AvErr(400, "too_many")
         entry = dict(av.get(key) or {})
@@ -197,8 +382,9 @@ def handle(h, method: str, path: str) -> bool:
             return True
         m = re.fullmatch(r"/api/avatars/img/([a-z0-9_.-]{1,48})", path)
         if method == "GET" and m:
-            entry = load().get(m.group(1))
-            p, ctype = _image_path(m.group(1), entry or {})
+            av = load()
+            k = resolve(m.group(1), av)
+            p, ctype = _image_path(k, av.get(k) or {})
             if not p:
                 raise AvErr(404, "not_found")
             data = p.read_bytes()
@@ -211,12 +397,21 @@ def handle(h, method: str, path: str) -> bool:
             h.end_headers()
             h.wfile.write(data)
             return True
-        if method == "POST" and path in ("/api/avatars/set", "/api/avatars/remove"):
+        if method == "GET" and path == "/api/avatars/senders":
+            h._json(200, {"profiles": senders()})
+            return True
+        if method == "POST" and path in ("/api/avatars/set", "/api/avatars/remove",
+                                         "/api/avatars/merge", "/api/avatars/unmerge"):
             if not h._require_stepup():
                 return True
             body = h._read_json()
             if path.endswith("/set"):
                 h._json(200, {"ok": True, "avatar": set_avatar(body)})
+            elif path.endswith("/merge"):
+                h._json(200, {"ok": True, "avatar": merge(body)})
+            elif path.endswith("/unmerge"):
+                unmerge(body)
+                h._json(200, {"ok": True})
             else:
                 remove(str(body.get("key") or ""))
                 h._json(200, {"ok": True})

@@ -85,6 +85,7 @@
           <button type="button" class="mode-tab" data-mode="apps" id="tab-apps">Apps</button>
           <button type="button" class="mode-tab" data-mode="mail" id="tab-mail" title="Nullmail">Mail</button>
           <button type="button" class="mode-tab" data-mode="vault" id="tab-vault">Vault</button>
+          <button type="button" class="mode-tab" id="tab-bots" data-bots-open>Bots</button>
         </div>
 
         <div class="sidebar-section">
@@ -204,6 +205,7 @@
             <button type="button" class="chrome-mode" data-mode="apps" id="chrome-tab-apps">Apps</button>
             <button type="button" class="chrome-mode" data-mode="mail" id="chrome-tab-mail" title="Nullmail">Mail</button>
             <button type="button" class="chrome-mode" data-mode="vault" id="chrome-tab-vault">Vault</button>
+            <button type="button" class="chrome-mode" id="chrome-tab-bots" data-bots-open>Bots</button>
           </div>
           <div class="chrome-layout" id="chrome-layout" title="Layout (wide screens)">
             <button type="button" id="btn-roster-toggle" class="nl-panel-toggle" aria-pressed="true" title="Collapse roster">Roster ‹</button>
@@ -599,6 +601,11 @@
             <span class="nl-tools-tile__label">Vault</span>
             <span class="nl-tools-tile__hint">OTP notes</span>
           </button>
+          <button type="button" class="nl-tools-tile" data-tool="bots" role="listitem">
+            <span class="nl-tools-tile__icon" aria-hidden="true">🤖</span>
+            <span class="nl-tools-tile__label">Bots</span>
+            <span class="nl-tools-tile__hint">Avatars &amp; names</span>
+          </button>
         </div>
       </div>
 
@@ -650,6 +657,10 @@
             <span class="nl-workspace-tile__label">Vault</span>
             <span class="nl-workspace-tile__hint">OTP notes</span>
           </button>
+          <button type="button" class="nl-workspace-tile" data-tool="bots" role="listitem">
+            <span class="nl-workspace-tile__label">Bots</span>
+            <span class="nl-workspace-tile__hint">Avatars &amp; names</span>
+          </button>
         </div>
       </aside>
       <button type="button" id="nl-workspace-rail" class="nl-collapsed-rail nl-collapsed-rail--workspace hidden" aria-label="Expand workspace" title="Show workspace">Workspace</button>
@@ -676,7 +687,8 @@
 
   <div id="guest-banner" class="guest-banner hidden" role="status"></div>
   <script src="/vendor/socket.io.min.js?v=4.8.1"></script>
-  <script src="/avatars.js?v=av1"></script>
+  <script src="/avatars.js?v=av2"></script>
+  <script src="/bots.js?v=bots1"></script>
   <script src="/app.js?v=sio1-ssh1-vault1-fm1-ed1-vl1"></script>
   <script src="/guest.js?v=g4"></script>
   <script src="/sanitize.js?v=ed1"></script>

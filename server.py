@@ -4161,6 +4161,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("vendor/codemirror/codemirror.bundle.js", "application/javascript; charset=utf-8")
         if path == "/vendor/codemirror/LICENSE.txt":
             return self._serve_static("vendor/codemirror/LICENSE.txt", "text/plain; charset=utf-8")
+        if path == "/bots.js":
+            return self._serve_static("bots.js", "application/javascript; charset=utf-8")
         if path == "/avatars.js":
             return self._serve_static("avatars.js", "application/javascript; charset=utf-8")
         if path == "/favorites.js":
@@ -6701,6 +6703,10 @@ def main() -> None:
         ensure_chatgpt_in_roster()
     except Exception as exc:
         print(f"ensure_chatgpt_in_roster: {exc}", flush=True)
+    try:
+        avatars.seed_defaults()
+    except Exception as exc:  # never block startup on starter avatars
+        print(f"avatar seed skipped: {exc}", flush=True)
     try:
         ensure_chatgpt_playground_label()
     except Exception as exc:
