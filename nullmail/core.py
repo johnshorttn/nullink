@@ -154,6 +154,9 @@ class Drafts:
             db.execute('CREATE TABLE IF NOT EXISTS drafts (id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL, updated REAL NOT NULL, queue_id TEXT)')
             if 'trashed_from' not in [r[1] for r in db.execute('PRAGMA table_info(drafts)')]:
                 db.execute('ALTER TABLE drafts ADD COLUMN trashed_from TEXT')
+            cols=[r[1] for r in db.execute('PRAGMA table_info(drafts)')]
+            for c,t in (('send_at','REAL'),('send_key','TEXT'),('send_actor','TEXT')):
+                if c not in cols: db.execute('ALTER TABLE drafts ADD COLUMN %s %s'%(c,t))
     @contextmanager
     def db(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -164,7 +167,7 @@ class Drafts:
             db.close()
     def list(self):
         with self.db() as db:
-            return [dict(json.loads(data), id=key, status=status, updated=updated, queue_id=queue, **({'trashed_from': prev} if prev else {})) for key,data,status,updated,queue,prev in db.execute('SELECT id,data,status,updated,queue_id,trashed_from FROM drafts ORDER BY updated DESC')]
+            return [dict(json.loads(data), id=key, status=status, updated=updated, queue_id=queue, **({'trashed_from': prev} if prev else {}), **({'send_at': at} if status=='scheduled' and at else {})) for key,data,status,updated,queue,prev,at in db.execute('SELECT id,data,status,updated,queue_id,trashed_from,send_at FROM drafts ORDER BY updated DESC')]
     def get(self, key):
         return next((d for d in self.list() if d['id'] == key), None)
     def save(self, data, identities):
@@ -174,6 +177,9 @@ class Drafts:
         if sender not in identities: raise ValueError('From identity is not authorized')
         clean = {'from': sender, 'to': header(data.get('to', ''), 2000), 'subject': header(data.get('subject', ''), 200),
                  'body': data.get('body', ''), 'in_reply_to': header(data.get('in_reply_to', ''), 998)}
+        for flag in ('read_receipt','track_opens'):
+            if flag in data and not isinstance(data[flag], bool): raise ValueError(flag+' must be boolean')
+            clean[flag] = data.get(flag) is True
         if not isinstance(clean['body'], str) or len(clean['body'].encode()) > 180000: raise ValueError('Draft is too large')
         if data.get('body_html'):
             # Rich text: never trust browser HTML. Sanitize, keep inline images as data: for re-editing,
@@ -192,6 +198,27 @@ class Drafts:
         with self.db() as db:
             changed=db.execute("UPDATE drafts SET status='submitting',updated=? WHERE id=? AND status IN ('draft','paused','rejected')", (time.time(),key)).rowcount
             if changed != 1: raise ValueError('Already submitted; duplicate send blocked')
+    # Undo send: a scheduled item waits in the Outbox until send_at; until the worker claims it,
+    # Retract returns it to Drafts. Once claimed (status 'submitting') it cannot be recalled.
+    def schedule(self, key, send_at, request_key, actor):
+        with self.db() as db:
+            changed=db.execute("UPDATE drafts SET status='scheduled',send_at=?,send_key=?,send_actor=?,updated=? WHERE id=? AND status IN ('draft','paused','rejected')", (send_at,request_key,actor,time.time(),key)).rowcount
+            if changed != 1: raise ValueError('Already submitted; duplicate send blocked')
+    def retract(self, key):
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT status,send_key FROM drafts WHERE id=?', (key,)).fetchone()
+            if not row: raise FileNotFoundError('Outbound message not found')
+            if row[0]!='scheduled': raise ValueError('Too late to retract: the message was already handed to the mail server' if row[0] in ('submitting','accepted','unknown') else 'Message is not waiting to send')
+            db.execute("UPDATE drafts SET status='draft',send_at=NULL,send_key=NULL,send_actor=NULL,updated=? WHERE id=?", (time.time(),key))
+        return {'id':key,'status':'draft','request_id':row[1]}
+    def due(self, now=None):
+        with self.db() as db:
+            return [dict(id=k,request_id=r,actor=a) for k,r,a in db.execute("SELECT id,send_key,send_actor FROM drafts WHERE status='scheduled' AND send_at<=?", (now or time.time(),))]
+    def claim_scheduled(self, key):
+        with self.db() as db:
+            changed=db.execute("UPDATE drafts SET status='submitting',send_at=NULL,updated=? WHERE id=? AND status='scheduled'", (time.time(),key)).rowcount
+            if changed != 1: raise ValueError('Retracted or already submitted')
     # Outbound delete. Trash is the default and reversible; purge needs explicit confirmation.
     # Trashing an unsent item (draft/paused/rejected) cancels its send: claim() only accepts those
     # statuses, so a trashed row can never be submitted. 'submitting' is mid-handoff and is refused.
@@ -203,8 +230,8 @@ class Drafts:
             if not row: raise FileNotFoundError('Outbound message not found')
             if row[0] == 'trashed': return {'id': key, 'status': 'trashed', 'cancelled': False, 'already_submitted': False}
             if row[0] == 'submitting': raise ValueError('Submission is in progress; it cannot be cancelled now')
-            db.execute("UPDATE drafts SET status='trashed',trashed_from=?,updated=? WHERE id=?", (row[0], time.time(), key))
-        return {'id': key, 'status': 'trashed', 'cancelled': row[0] in ('paused', 'rejected', 'draft'), 'already_submitted': row[0] in ('accepted', 'unknown')}
+            db.execute("UPDATE drafts SET status='trashed',trashed_from=?,send_at=NULL,updated=? WHERE id=?", (row[0], time.time(), key))
+        return {'id': key, 'status': 'trashed', 'cancelled': row[0] in ('paused', 'rejected', 'draft', 'scheduled'), 'already_submitted': row[0] in ('accepted', 'unknown')}
     def restore(self, key):
         with self.db() as db:
             row = db.execute('SELECT status,trashed_from FROM drafts WHERE id=?', (key,)).fetchone()
@@ -226,17 +253,23 @@ class Drafts:
     def status(self, key, status, queue=None):
         with self.db() as db: db.execute('UPDATE drafts SET status=?,queue_id=?,updated=? WHERE id=?', (status, queue, time.time(), key))
 
-def build_message(draft, identities):
+def build_message(draft, identities, message_id=None, track_url=None):
+    """read_receipt → Disposition-Notification-To; track_url → 1x1 image in the HTML part (HTML is created if needed)."""
     if draft['from'] not in identities: raise ValueError('From identity is not authorized')
     recipients = addresses(draft['to'])
     msg = EmailMessage(policy=email.policy.SMTP)
     for k,v in [('From',draft['from']),('To',draft['to']),('Subject',draft['subject'])]: msg[k] = header(v, 2000)
     if draft.get('in_reply_to'): msg['In-Reply-To'] = header(draft['in_reply_to'])
-    msg['Date'] = formatdate(localtime=False); msg['Message-ID'] = make_msgid(domain='nullverse.cloud')
-    if draft.get('body_html'):
-        safe, images = compose.sanitize(draft['body_html'])
-        msg.set_content(compose.to_text(safe))
-        msg.add_alternative(compose.document(safe), subtype='html')
+    msg['Date'] = formatdate(localtime=False); msg['Message-ID'] = message_id or make_msgid(domain='nullverse.cloud')
+    if draft.get('read_receipt'): msg['Disposition-Notification-To'] = header(draft['from'], 254)
+    pixel = '<img src="%s" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0">' % track_url if track_url else ''
+    if draft.get('body_html') or pixel:
+        if draft.get('body_html'): safe, images = compose.sanitize(draft['body_html'])
+        else:
+            import html as _h
+            safe, images = ''.join('<p>%s</p>' % (_h.escape(l) or '<br>') for l in draft['body'].split('\n')), []
+        msg.set_content(compose.to_text(safe) if draft.get('body_html') else draft['body'])
+        msg.add_alternative(compose.document(safe + pixel), subtype='html')
         part = msg.get_payload()[1]
         for img in images: part.add_related(img['data'], 'image', img['subtype'], cid='<%s>' % img['cid'], disposition='inline', filename=img['cid'].split('.')[0] + '.' + img['subtype'].replace('jpeg', 'jpg'))
     else: msg.set_content(draft['body'])

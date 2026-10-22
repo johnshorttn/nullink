@@ -27,7 +27,13 @@ def _enum(*opts):
         if v not in opts: raise ValueError('must be one of '+', '.join(opts))
         return v
     return f
-KEYS={'tree':_tree,'last_view':_view,'body_mode':_enum('html','text'),'dismissed':_dismissed,'setup_tab':_enum(*SETUP_TABS)}
+def _undo(v):
+    if isinstance(v,bool) or not isinstance(v,int) or not 0<=v<=120: raise ValueError('undo_send_seconds must be 0–120')
+    return v
+def _bool(v):
+    if not isinstance(v,bool): raise ValueError('boolean required')
+    return v
+KEYS={'undo_send_seconds':_undo,'track_opens_default':_bool,'tree':_tree,'last_view':_view,'body_mode':_enum('html','text'),'dismissed':_dismissed,'setup_tab':_enum(*SETUP_TABS)}
 def validate(data):
     if not isinstance(data,dict) or set(data)!={'prefs'} or not isinstance(data['prefs'],dict): raise ValueError('Body must be {"prefs": {key: {value, updated}}}')
     out={};now=time.time()*1000

@@ -9,7 +9,7 @@ import datetime, hashlib, json, os, pathlib, shutil, sqlite3, subprocess, time, 
 SOURCE=pathlib.Path(__file__).resolve().parents[1]
 RUNTIME=pathlib.Path('/usr/local/lib/nullmail')
 BACKUPS=pathlib.Path('/root/nullmail-build-backup')
-FILES=['app.py','core.py','api_v1.py','workspace.py','rules.py','cases.py','gmail.py','openapi.json','static/app.js','static/workspace.js','static/cases.js','static/outbound.js','static/index.html','static/style.css']
+FILES=['app.py','core.py','receipts.py','prefs.py','transport.py','api_v1.py','workspace.py','rules.py','cases.py','gmail.py','openapi.json','static/app.js','static/workspace.js','static/cases.js','static/outbound.js','static/receipts.js','static/index.html','static/style.css']
 
 def hashes(root):
     return {str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts}

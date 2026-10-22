@@ -145,7 +145,17 @@ def read(handler,path,q):
         for m in rows[offset:offset+limit]:
             m['message_ref']=server.mail.reference(m['id']) if hasattr(server.mail,'reference') else cases.reference(m['id']);m['cases']=case_service.badges(m['message_ref'])
         return {'messages':rows[offset:offset+limit],'total':len(rows),'offset':offset,'next_offset':offset+limit if offset+limit<len(rows) else None}
-    if path=='message': return message(handler,arg('folder','inbox'),arg('id'))
+    if path=='message':
+        import receipts
+        m=message(handler,arg('folder','inbox'),arg('id'))
+        try:raw=server.mail.read(server.mail.locate(arg('folder','inbox'),m['id']))
+        except Exception:raw=None
+        with store.db() as db:
+            m['delivery']=receipts.by_message_id(db,m.get('message_id')) if m.get('message_id') else None
+            req=receipts.mdn_request(raw) if raw is not None and arg('folder','inbox') in ('inbox','archive') else None
+            if req and m.get('from') and any(a.lower() in m['from'].lower() for a in perm['send']):req=None
+            m['mdn_request']=dict(req,answered=receipts.mdn_state(db,m['id'])) if req else None
+        return m
     if path=='thread':
         original=message(handler,arg('folder','inbox'),arg('id'))
         # References are message identifiers, not subject-based guesses. Return
@@ -172,7 +182,11 @@ def read(handler,path,q):
     if path=='sent':
         # Audit rows are kept; rows whose outbound message was trashed or permanently deleted are hidden here.
         live={d['id']:d['status'] for d in handler.server.drafts.list()}
-        return {'records':[r for r in store.sent(actor,offset) if live.get(r['draft']) not in (None,'trashed')],'delivery_verified':False}
+        import receipts
+        rows=[r for r in store.sent(actor,offset) if live.get(r['draft']) not in (None,'trashed') and r['result'].get('status')!='retracted']
+        with store.db() as db:
+            for r in rows:r['delivery']=receipts.summary(db,r['draft'])
+        return {'records':rows,'delivery_verified':False}
     raise FileNotFoundError()
 
 
