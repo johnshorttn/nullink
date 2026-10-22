@@ -106,3 +106,43 @@ class BotsTests(AvBase):
         self.assertEqual(idx.count('data-tool="bots"'), 2)
         self.assertEqual(idx.count("data-bots-open"), 2)
         self.assertIn('tool === "bots"', (server.STATIC / "app.js").read_text())
+
+
+class BotsHiddenTests(AvBase):
+    def setUp(self):
+        AvBase.setUp(self)
+        avatars._senders_cache.update(key=None, val=None)
+        self._msgs = server.MESSAGES_FILE.read_text() if server.MESSAGES_FILE.exists() else ""
+
+    def tearDown(self):
+        avatars._hidden_file().unlink(missing_ok=True)
+        server.MESSAGES_FILE.write_text(self._msgs)
+        AvBase.tearDown(self)
+    write_msgs = BotsTests.write_msgs
+
+    def test_hide_needs_stepup(self):
+        self.age_stepup()
+        self.assertEqual(self.j("/api/avatars/hide", {"key": "rt-e2e"})[2]["error"], "step_up_required")
+    def test_hide_unhide_keeps_history_and_chat(self):
+        self.write_msgs([{"role": "agent", "text": "[ui-smoke] a", "session_id": "council"},
+                         {"role": "agent", "text": "[Jinx] b", "session_id": "council"}])
+        st, _, js, _ = self.j("/api/avatars/hide", {"keys": ["ui-smoke"], "hidden": True})
+        self.assertEqual(st, 200, js)
+        prof = {p["key"]: p for p in self.j("/api/avatars/senders")[2]["profiles"]}
+        self.assertTrue(prof["ui-smoke"]["hidden"])
+        self.assertFalse(prof["jinx"]["hidden"])
+        self.assertEqual(prof["ui-smoke"]["count"], 1)  # history untouched
+        self.assertIn("[ui-smoke] a", server.MESSAGES_FILE.read_text())
+        self.assertNotIn("ui-smoke", avatars.load())  # no profile created; chat renders as before
+        self.j("/api/avatars/hide", {"key": "ui-smoke", "hidden": False})
+        prof = {p["key"]: p for p in self.j("/api/avatars/senders")[2]["profiles"]}
+        self.assertFalse(prof["ui-smoke"]["hidden"])
+
+    def test_hide_rejects_owner_and_empty(self):
+        self.assertEqual(self.j("/api/avatars/hide", {"key": "John"})[0], 400)
+        self.assertEqual(self.j("/api/avatars/hide", {"keys": []})[0], 400)
+
+    def test_hide_follows_alias(self):
+        self.set(name="Claude", key="claude")
+        self.j("/api/avatars/merge", {"into": "claude", "from": "claude-code", "name": "Claude"})
+        self.assertEqual(self.j("/api/avatars/hide", {"key": "claude-code"})[2]["keys"], ["claude"])

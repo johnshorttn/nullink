@@ -273,6 +273,7 @@ def senders() -> list:
     seen = _senders_cache["val"] or {}
     av = load()
     pm = public_map()
+    hidden = load_hidden()
     prof = {}
     for k, e in seen.items():
         c = resolve(k, av)
@@ -288,10 +289,52 @@ def senders() -> list:
         m = pm.get(c) or {}
         p.update(name=m.get("name") or (p["names"][0] if p["names"] else c),
                  url=m.get("url"), color=m.get("color"), initials=m.get("initials") or initials(p["names"][0] if p["names"] else c),
-                 hue=hue_for(c), aliases=m.get("aliases") or [], configured=c in av)
+                 hue=hue_for(c), aliases=m.get("aliases") or [], configured=c in av,
+                 hidden=c in hidden)
         out.append(p)
     out.sort(key=lambda p: (p["key"] == "john", -p["count"], p["name"].lower()))
     return out
+
+
+def _hidden_file():
+    return S.DATA / "bots_hidden.json"
+
+
+def load_hidden() -> set:
+    """Profile keys hidden from the Bots page (display only; chat + history untouched)."""
+    try:
+        h = json.loads(_hidden_file().read_text(encoding="utf-8")).get("hidden") or []
+        return {k for k in h if isinstance(k, str) and k and key_for(k) == k}
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def set_hidden(body: dict) -> dict:
+    keys = body.get("keys")
+    if keys is None:
+        keys = [body.get("key")]
+    if not isinstance(keys, list) or not keys or len(keys) > MAX_ENTRIES:
+        raise AvErr(400, "key_required")
+    hide = bool(body.get("hidden", True))
+    with _lock:
+        av = load()
+        ks = []
+        for k in keys:
+            k = key_for(k or "")
+            if not k:
+                raise AvErr(400, "key_required")
+            ks.append(resolve(k, av))
+        if hide and "john" in ks:
+            raise AvErr(400, "cannot_hide_owner")
+        cur = load_hidden()
+        cur = (cur | set(ks)) if hide else (cur - set(ks))
+        f = _hidden_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"hidden": sorted(cur)}, indent=2), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, f)
+    return {"keys": ks, "hidden": hide}
 
 
 def _sniff(raw: bytes):
@@ -401,7 +444,8 @@ def handle(h, method: str, path: str) -> bool:
             h._json(200, {"profiles": senders()})
             return True
         if method == "POST" and path in ("/api/avatars/set", "/api/avatars/remove",
-                                         "/api/avatars/merge", "/api/avatars/unmerge"):
+                                         "/api/avatars/merge", "/api/avatars/unmerge",
+                                         "/api/avatars/hide"):
             if not h._require_stepup():
                 return True
             body = h._read_json()
@@ -409,6 +453,8 @@ def handle(h, method: str, path: str) -> bool:
                 h._json(200, {"ok": True, "avatar": set_avatar(body)})
             elif path.endswith("/merge"):
                 h._json(200, {"ok": True, "avatar": merge(body)})
+            elif path.endswith("/hide"):
+                h._json(200, {"ok": True, **set_hidden(body)})
             elif path.endswith("/unmerge"):
                 unmerge(body)
                 h._json(200, {"ok": True})
