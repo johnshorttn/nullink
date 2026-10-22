@@ -28,9 +28,10 @@ try:
             assert request(base,path)[0]==401
         assert request(base,'/health')[0]==200
         status,raw=request(base,'/api/v1/capabilities',token);assert status==200
-        caps=json.loads(raw);assert caps['version']=='1' and caps['features']['rules'] and caps['features']['gmail'] and not caps['gmail']['connected'] and not caps['gmail']['configured']
+        caps=json.loads(raw);assert caps['version']=='1' and caps['features']['rules'] and caps['features']['gmail'] and caps['gmail']['connected'] and caps['gmail']['configured'] and caps['gmail']['blockers']==[]
         status,raw=request(base,'/api/v1/gmail/status',token);assert status==200
-        gmail=json.loads(raw);assert gmail['accounts']==[] and len(gmail['blockers'])==3
+        gmail=json.loads(raw);addresses=sorted(a['address'] for a in gmail['accounts'])
+        assert gmail['connected'] and gmail['configured'] and gmail['blockers']==[] and 'ibbofez@gmail.com' in addresses and addresses==sorted(a['address'] for a in caps['gmail']['accounts'])
         assert request(base,'/api/v1/gmail/connect',token,{},csrf='invalid')[0]==403
         assert request(base,'/api/v1/accounts',token)[0]==200
         assert request(base,'/api/v1/rules',token)[0]==200
