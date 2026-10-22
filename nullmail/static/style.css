@@ -81,3 +81,12 @@
 button.danger{color:#ff8a8a;border-color:#a33}
 .ob-draft-actions{display:inline-flex;gap:.5rem;flex-wrap:wrap}
 .ob-trash-outbound{border-bottom:1px solid var(--line,#333);margin-bottom:.5rem}
+/* Undo send, receipts */
+.rc-undo{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:50;display:flex;gap:16px;align-items:center;padding:10px 16px;border-radius:10px;background:#2b2440;color:#fff;box-shadow:0 6px 24px #0008;max-width:calc(100vw - 24px)}
+.rc-undo button{font-weight:600}
+.rc-options{display:flex;flex-wrap:wrap;gap:8px 20px;margin:8px 0}
+.rc-toggle{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}.rc-toggle small{flex-basis:100%;margin-left:22px;font-size:11px}
+.rc-badge{display:inline-block;margin-top:4px;font-size:11px;padding:1px 8px;border-radius:999px;background:#ffffff14}
+.rc-delivered{color:#7ee2a8}.rc-bounced{color:#ff8b8b}.rc-delayed{color:#f2c76b}.rc-sent{color:#b9b4d0}
+.rc-status{margin:8px 0}.rc-mdn-request{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;border:1px solid #f2c76b66;border-radius:8px;margin:8px 0}
+.rc-retract{margin:4px 8px}.rc-settings{margin-bottom:16px}.rc-setting{display:flex;gap:10px;align-items:center;margin:8px 0}.rc-setting input[type=number]{width:80px}

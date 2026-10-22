@@ -13,7 +13,8 @@ def outbound_enabled():
 class DirectPostfix:
     def __init__(self, enabled=False, host='mail.nullverse.cloud', port=2526):
         self.enabled, self.host, self.port = enabled, host, port
-    def submit(self, sender, recipients, raw):
+    def submit(self, sender, recipients, raw, envid=None):
+        """envid: request DSN (NOTIFY=SUCCESS,FAILURE,DELAY; RET=HDRS) when the server advertises DSN."""
         if not self.enabled: return {'status':'paused','queue_id':None}
         smtp = None
         data_started = False
@@ -23,17 +24,18 @@ class DirectPostfix:
             smtp = smtplib.SMTP('127.0.0.1',self.port,timeout=15)
             smtp.ehlo(); smtp._host = self.host
             smtp.starttls(context=context); smtp.ehlo()
-            code,_ = smtp.mail(sender)
+            dsn = bool(envid) and smtp.has_extn('dsn')
+            code,_ = smtp.mail(sender, ['RET=HDRS','ENVID='+envid] if dsn else [])
             if code != 250: return {'status':'rejected','queue_id':None}
             for recipient in recipients:
-                code,_ = smtp.rcpt(recipient)
+                code,_ = smtp.rcpt(recipient, ['NOTIFY=SUCCESS,FAILURE,DELAY','ORCPT=rfc822;'+recipient] if dsn else [])
                 if code not in (250,251):
                     smtp.rset(); return {'status':'rejected','queue_id':None}
             data_started = True
             code,response = smtp.data(raw)
             if code != 250: return {'status':'rejected','queue_id':None}
             match = re.search(rb'queued as ([A-F0-9]+)',response)
-            return {'status':'accepted','queue_id':match.group(1).decode() if match else None}
+            return {'status':'accepted','queue_id':match.group(1).decode() if match else None,'dsn':dsn}
         except smtplib.SMTPDataError:
             return {'status':'rejected','queue_id':None}
         except Exception:

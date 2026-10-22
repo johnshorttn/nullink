@@ -101,9 +101,16 @@ class Handler(BaseHTTPRequestHandler):
             origin=self.headers.get('Origin')
             if write and (origin not in ORIGINS or origin!=self.expected_origin() or self.headers.get('Sec-Fetch-Site') not in (None,'same-origin')):
                 return self.reply(403,{'error':'Origin rejected'})
-            if not write and path in ('/','/app.js','/workspace.js','/cases.js','/outbound.js','/composer.js','/vendor/quill.js','/vendor/quill.snow.css','/style.css'):
-                f={'/':'index.html','/app.js':'app.js','/workspace.js':'workspace.js','/cases.js':'cases.js','/outbound.js':'outbound.js','/composer.js':'composer.js','/vendor/quill.js':'vendor/quill.js','/vendor/quill.snow.css':'vendor/quill.snow.css','/style.css':'style.css'}[path]
-                return self.reply(200,(STATIC/f).read_bytes(),{'/':'text/html; charset=utf-8','/composer.js':'text/javascript; charset=utf-8','/vendor/quill.js':'text/javascript; charset=utf-8','/vendor/quill.snow.css':'text/css; charset=utf-8','/app.js':'text/javascript; charset=utf-8','/workspace.js':'text/javascript; charset=utf-8','/cases.js':'text/javascript; charset=utf-8','/outbound.js':'text/javascript; charset=utf-8','/style.css':'text/css; charset=utf-8'}[path])
+            if not write and path in ('/','/app.js','/workspace.js','/cases.js','/outbound.js','/receipts.js','/composer.js','/vendor/quill.js','/vendor/quill.snow.css','/style.css'):
+                f={'/':'index.html','/app.js':'app.js','/workspace.js':'workspace.js','/cases.js':'cases.js','/outbound.js':'outbound.js','/receipts.js':'receipts.js','/composer.js':'composer.js','/vendor/quill.js':'vendor/quill.js','/vendor/quill.snow.css':'vendor/quill.snow.css','/style.css':'style.css'}[path]
+                return self.reply(200,(STATIC/f).read_bytes(),{'/':'text/html; charset=utf-8','/composer.js':'text/javascript; charset=utf-8','/vendor/quill.js':'text/javascript; charset=utf-8','/vendor/quill.snow.css':'text/css; charset=utf-8','/app.js':'text/javascript; charset=utf-8','/workspace.js':'text/javascript; charset=utf-8','/cases.js':'text/javascript; charset=utf-8','/outbound.js':'text/javascript; charset=utf-8','/receipts.js':'text/javascript; charset=utf-8','/style.css':'text/css; charset=utf-8'}[path])
+            if not write and path.startswith('/t/') and path.endswith('.gif'):
+                # Open-tracking pixel (opt-in per message). Unauthenticated; stores time only. John's own
+                # signed-in views (session cookie present) are not counted.
+                import receipts
+                if not self.cookie():
+                    with MUTATION, api_v1.state(self.server).db() as db:receipts.record_open(db,path[3:-4])
+                return self.reply(200,receipts.PIXEL,'image/gif',{'Cache-Control':'no-store, private','Cross-Origin-Resource-Policy':'cross-origin'})
             if not write and path=='/health': return self.reply(200,{'ok':True,'service':'nullmail'})
             if path=='/api/auth/method' and not write:
                 status,body,_=nullink('/api/auth/method');return self.reply(status,body)
@@ -209,6 +216,34 @@ class Handler(BaseHTTPRequestHandler):
                 results.append({'id':m['id'],'status':'deleted' if permanent else 'trashed'})
             except (ValueError,FileNotFoundError) as e: results.append({'id':m['id'],'error':str(e)})
         return {'results':results,'ok':sum('error' not in r for r in results),'failed':sum('error' in r for r in results)}
+    def mdn_respond(self,data,store,actor,perm):
+        """John explicitly answers a read-receipt request: 'send' or 'ignore'. Never automatic."""
+        import receipts
+        if data.get('action') not in ('send','ignore'):raise ValueError('action must be send or ignore')
+        if data['action']=='send' and data.get('confirm') is not True:raise ValueError('Confirm sending the read receipt')
+        m=api_v1.message(self,data.get('folder'),data.get('id'))
+        original=self.server.mail.read(self.server.mail.locate(data['folder'],m['id']))
+        req=receipts.mdn_request(original)
+        if not req:raise ValueError('This message did not request a read receipt')
+        with store.db() as db:receipts.mdn_claim(db,m['id'],data['action'])
+        if data['action']=='ignore':return {'status':'ignored','message':'No receipt will be sent.'}
+        import email.utils
+        addressed=[a.lower() for h in (original.get('To'),original.get('Cc'),m.get('envelope_recipient')) if h for _,a in email.utils.getaddresses([str(h)]) if a]
+        gmail_account=m.get('gmail_account')
+        if gmail_account:
+            acct=next((a for a in self.server.gmail.accounts(actor) if a['id']==gmail_account),None)
+            sender=acct and acct['address']
+        else:sender=next((a for a in addressed+[x.lower() for x in m.get('routing_recipients') or []] if a in [x.lower() for x in perm['send']]),None)
+        if not sender:
+            with store.db() as db:receipts.mdn_done(db,m['id'],'failed')
+            raise PermissionError('No authorized identity received this message')
+        raw=receipts.build_mdn(original,sender,req['to'])
+        if gmail_account:
+            try:result=self.server.gmail.submit(actor,gmail_account,sender,raw)
+            except Exception:result={'status':'unknown'}
+        else:result=DirectPostfix(enabled=getattr(self.server,'outbound_enabled',False)).submit(sender,[req['to']],raw)
+        with store.db() as db:receipts.mdn_done(db,m['id'],result['status'])
+        return {'status':result['status'],'message':{'paused':'Outbound is paused; the receipt was not sent.','accepted':'Read receipt handed to the mail server.'}.get(result['status'],'Read receipt was not confirmed as sent.')}
     def write_api(self,path,data):
         if path=='/api/auth/logout':
             status,body,cookie=nullink(path,self.cookie(),b'{}');return self.reply(status,body,extra={'Set-Cookie':cookie} if cookie else None)
@@ -259,27 +294,82 @@ class Handler(BaseHTTPRequestHandler):
             if not request_key:
                 request_key=secrets.token_hex(16)
                 store.send_claim(request_key,draft,actor,str(getattr(self,'auth_data',{}).get('session',{}).get('id','legacy-session')))
-            enabled=bool(external) or getattr(self.server,'outbound_enabled',False)
-            if enabled: self.server.drafts.claim(draft['id'])
-            if external:
-                try:result=self.server.gmail.submit(actor,external['id'],draft['from'],raw)
-                except Exception:result={'status':'unknown','queue_id':None}
-            else:result=DirectPostfix(enabled=enabled).submit(draft['from'],recipients,raw)
-            self.server.drafts.status(draft['id'],result['status'],result['queue_id'])
-            messages={'paused':'Saved in paused Outbox. Nothing was sent.',
-                      'accepted':'Accepted by Postfix and queued. Delivery is not confirmed.',
-                      'rejected':'Submission failed before acceptance. No automatic retry; review before trying again.',
-                      'unknown':'Submission outcome is uncertain. Do not resend: delivery may have occurred. Administrator review required.'}
-            if external:messages['accepted']='Accepted by Gmail. Delivery is not confirmed.'
-            response={'id':draft['id'],**result,'provider':'gmail' if external else 'local','message':messages[result['status']]}
-            store.send_result(request_key,response)
-            return self.reply(200,response)
+            delay=send_delay(store,actor,getattr(self.server,'undo_default',0))
+            if delay>0:
+                send_at=time.time()+delay
+                self.server.drafts.schedule(draft['id'],send_at,request_key,actor)
+                response={'id':draft['id'],'status':'scheduled','send_at':send_at,'delay':delay,'queue_id':None,'provider':'gmail' if external else 'local',
+                          'message':'Sending in %ds. Undo or Retract from the Outbox until then; after hand-off it cannot be recalled.'%delay}
+                store.send_result(request_key,response)
+                return self.reply(200,response)
+            self.server.drafts.claim(draft['id'])
+            return self.reply(200,deliver(self.server,draft['id'],actor,request_key))
+        if path=='/api/retract':
+            store.own_draft(data.get('id'),actor)
+            r=self.server.drafts.retract(data['id'])
+            if r.get('request_id'):store.send_result(r['request_id'],{'id':data['id'],'status':'retracted','queue_id':None,'message':'Retracted before sending. Nothing was transmitted.'})
+            return self.reply(200,{'id':data['id'],'status':'draft','message':'Retracted. Back in Drafts; nothing was sent.'})
+        if path=='/api/mdn/respond':
+            return self.reply(200,self.mdn_respond(data,store,actor,perm))
         return self.reply(404,{'error':'Not found'})
+
+UNDO_DEFAULT=30
+def send_delay(store,actor,default=UNDO_DEFAULT):
+    """Per-user undo window; servers without an explicit default (tests) send immediately."""
+    import prefs
+    with store.db() as db:v=prefs.get(db,actor).get('undo_send_seconds',{}).get('value',default)
+    return int(v) if isinstance(v,int) and 0<=v<=120 else default
+
+def deliver(server,draft_id,actor,request_key):
+    """Hand a claimed ('submitting') draft to Postfix or Gmail. Records DSN/MDN/tracking metadata."""
+    import receipts
+    from email.utils import make_msgid
+    store=api_v1.state(server);draft=server.drafts.get(draft_id)
+    external=next((a for a in server.gmail.accounts(actor) if a['address']==draft['from']),None) if hasattr(server,'gmail') else None
+    enabled=bool(external) or getattr(server,'outbound_enabled',False)
+    message_id=make_msgid(idstring='nm'+draft_id[:12],domain='nullverse.cloud')
+    track=None
+    if draft.get('track_opens'):track=receipts.new_track_token()
+    try:
+        recipients,raw=build_message(draft,[draft['from']],message_id=message_id,track_url=(TRACK_ORIGIN+'/t/'+track+'.gif') if track else None)
+    except Exception as e:
+        server.drafts.status(draft_id,'rejected');result={'status':'rejected','queue_id':None}
+    else:
+        if not enabled:result={'status':'paused','queue_id':None}
+        elif external:
+            try:result=server.gmail.submit(actor,external['id'],draft['from'],raw)
+            except Exception:result={'status':'unknown','queue_id':None}
+        else:result=DirectPostfix(enabled=getattr(server,'outbound_enabled',False)).submit(draft['from'],recipients,raw,envid=draft_id)
+        server.drafts.status(draft_id,result['status'],result['queue_id'])
+        if result['status'] in ('accepted','unknown'):
+            with store.db() as db:receipts.record_outbound(db,draft_id,message_id,draft_id,result.get('dsn'),draft.get('read_receipt'),track,recipients,'gmail' if external else 'local')
+    messages={'paused':'Saved in paused Outbox. Nothing was sent.',
+              'accepted':'Accepted by Postfix and queued.'+(' Delivery receipt requested.' if result.get('dsn') else ' Delivery is not confirmed.'),
+              'rejected':'Submission failed before acceptance. No automatic retry; review before trying again.',
+              'unknown':'Submission outcome is uncertain. Do not resend: delivery may have occurred. Administrator review required.'}
+    if external:messages['accepted']='Accepted by Gmail. Delivery is not confirmed; bounces are shown if Gmail returns one.'
+    response={'id':draft_id,**{k:v for k,v in result.items() if k!='dsn'},'dsn_requested':bool(result.get('dsn')),'provider':'gmail' if external else 'local','message':messages[result['status']]}
+    if request_key:store.send_result(request_key,response)
+    return response
+
+def send_due(server,now=None):
+    """Undo window elapsed: claim and send. A retract that won the race leaves nothing to claim."""
+    sent=0
+    for item in server.drafts.due(now):
+        with MUTATION:
+            try:server.drafts.claim_scheduled(item['id'])
+            except ValueError:continue
+            try:deliver(server,item['id'],item['actor'],item['request_id'])
+            except Exception:server.drafts.status(item['id'],'unknown');print('Nullmail scheduled send failed; outcome uncertain',flush=True)
+            sent+=1
+    return sent
+
+TRACK_ORIGIN=ORIGIN
 
 def serve(mailroot='/var/lib/nullmail/john/Maildir',state='/var/lib/nullmail/app',port=8789):
     os.umask(0o077);Path(state).mkdir(parents=True,exist_ok=True,mode=0o700)
     server=ThreadingHTTPServer(('127.0.0.1',port),Handler)
-    server.outbound_enabled=outbound_enabled()
+    server.outbound_enabled=outbound_enabled();server.undo_default=UNDO_DEFAULT
     server.mail=MailStore(mailroot);server.drafts=Drafts(Path(state)/'drafts.sqlite3')
     server.preview_key=secrets.token_bytes(32)
     workspace=api_v1.state(server);workspace.initialize_baseline(server.mail)
@@ -303,11 +393,19 @@ def serve(mailroot='/var/lib/nullmail/john/Maildir',state='/var/lib/nullmail/app
                     identities += [a['id'] for a in server.gmail.accounts('local-owner')]
                     workspace.process_new(server.mail,identities)
                     api_v1.reviews(server).collect()
+                    import receipts
+                    with workspace.db() as db:receipts.scan(db,server.mail)
             except Exception:
                 # No message content or credentials in logs. A claimed run is
                 # never retried automatically after an uncertain filesystem step.
                 print('Nullmail rule scan failed; inspect run history',flush=True)
+    def scheduler():
+        while True:
+            time.sleep(1)
+            try:send_due(server)
+            except Exception:print('Nullmail scheduler error',flush=True)
     threading.Thread(target=worker,daemon=True).start()
+    threading.Thread(target=scheduler,daemon=True).start()
     server.serve_forever()
 
 if __name__=='__main__': serve()
