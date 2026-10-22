@@ -54,7 +54,10 @@ class GmailAdapter(ProviderAdapter):
         elif source == 'spam' and target == 'inbox': add, remove = ['INBOX'], ['SPAM']
         elif target == 'archive': remove = ['INBOX']
         elif target == 'inbox' and source == 'archive': add = ['INBOX']
-        # Trash is not mirrored: moving to Gmail Trash leads to deletion and needs explicit confirmation.
+        # Trash is mirrored only for outbound (Sent) deletes, which the UI confirms first because
+        # Gmail empties its Trash after 30 days. Inbox/Archive/Spam -> Trash stays local-only.
+        elif target == 'trash' and source == 'sent': add = ['TRASH']
+        if source == 'trash' and target != 'trash': remove = remove + ['TRASH']
         return add, remove
     def read_change(self, read): return ([], ['UNREAD']) if read else (['UNREAD'], [])
 

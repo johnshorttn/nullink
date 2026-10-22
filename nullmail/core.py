@@ -133,8 +133,14 @@ class MailStore:
         target = p.parent.parent / 'cur' / (p.name.split(':2,')[0] + ':2,' + ''.join(sorted(flags)))
         p.rename(target)
 
+    def delete(self, folder, key, confirm=False):
+        """Permanent delete, only from Trash, only with explicit confirmation."""
+        if confirm is not True: raise ValueError('Permanent delete requires confirmation')
+        if folder != 'trash': raise ValueError('Move the message to Trash before deleting it permanently')
+        self.locate(folder, key).unlink()
+
     def move(self, folder, key, target):
-        if target not in ('inbox', 'trash', 'archive', 'spam') or folder not in ('inbox', 'trash', 'archive', 'spam') or target == folder:
+        if target not in ('inbox', 'trash', 'archive', 'spam') or folder not in ('inbox', 'trash', 'archive', 'spam', 'sent') or target == folder or (folder == 'sent' and target != 'trash'):
             raise ValueError('Only inbox, archive, spam and reversible trash moves are supported')
         p = self.locate(folder, key)
         dest = self.root / FOLDERS[target] / p.parent.name / p.name
@@ -146,6 +152,8 @@ class Drafts:
         self.path = str(path)
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS drafts (id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL, updated REAL NOT NULL, queue_id TEXT)')
+            if 'trashed_from' not in [r[1] for r in db.execute('PRAGMA table_info(drafts)')]:
+                db.execute('ALTER TABLE drafts ADD COLUMN trashed_from TEXT')
     @contextmanager
     def db(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -156,7 +164,7 @@ class Drafts:
             db.close()
     def list(self):
         with self.db() as db:
-            return [dict(json.loads(data), id=key, status=status, updated=updated, queue_id=queue) for key,data,status,updated,queue in db.execute('SELECT * FROM drafts ORDER BY updated DESC')]
+            return [dict(json.loads(data), id=key, status=status, updated=updated, queue_id=queue, **({'trashed_from': prev} if prev else {})) for key,data,status,updated,queue,prev in db.execute('SELECT id,data,status,updated,queue_id,trashed_from FROM drafts ORDER BY updated DESC')]
     def get(self, key):
         return next((d for d in self.list() if d['id'] == key), None)
     def save(self, data, identities):
@@ -178,12 +186,43 @@ class Drafts:
         with self.db() as db:
             current = db.execute('SELECT status FROM drafts WHERE id=?', (key,)).fetchone()
             if current and current[0] not in ('draft', 'paused', 'rejected'): raise ValueError('Submitted messages cannot be edited')
-            db.execute('INSERT INTO drafts VALUES (?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET data=excluded.data, status=excluded.status, updated=excluded.updated', (key, json.dumps(clean), 'draft', time.time()))
+            db.execute('INSERT INTO drafts (id,data,status,updated,queue_id) VALUES (?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET data=excluded.data, status=excluded.status, updated=excluded.updated', (key, json.dumps(clean), 'draft', time.time()))
         return self.get(key)
     def claim(self, key):
         with self.db() as db:
             changed=db.execute("UPDATE drafts SET status='submitting',updated=? WHERE id=? AND status IN ('draft','paused','rejected')", (time.time(),key)).rowcount
             if changed != 1: raise ValueError('Already submitted; duplicate send blocked')
+    # Outbound delete. Trash is the default and reversible; purge needs explicit confirmation.
+    # Trashing an unsent item (draft/paused/rejected) cancels its send: claim() only accepts those
+    # statuses, so a trashed row can never be submitted. 'submitting' is mid-handoff and is refused.
+    # accepted/unknown were already handed to Postfix/Gmail: trashing hides them but cannot recall them.
+    def trash(self, key):
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT status FROM drafts WHERE id=?', (key,)).fetchone()
+            if not row: raise FileNotFoundError('Outbound message not found')
+            if row[0] == 'trashed': return {'id': key, 'status': 'trashed', 'cancelled': False, 'already_submitted': False}
+            if row[0] == 'submitting': raise ValueError('Submission is in progress; it cannot be cancelled now')
+            db.execute("UPDATE drafts SET status='trashed',trashed_from=?,updated=? WHERE id=?", (row[0], time.time(), key))
+        return {'id': key, 'status': 'trashed', 'cancelled': row[0] in ('paused', 'rejected', 'draft'), 'already_submitted': row[0] in ('accepted', 'unknown')}
+    def restore(self, key):
+        with self.db() as db:
+            row = db.execute('SELECT status,trashed_from FROM drafts WHERE id=?', (key,)).fetchone()
+            if not row: raise FileNotFoundError('Outbound message not found')
+            if row[0] != 'trashed': raise ValueError('Message is not in Trash')
+            # A restored unsent item comes back paused: nothing is transmitted until an explicit Send.
+            prev = row[1] if row[1] in ('draft', 'rejected', 'accepted', 'unknown') else 'paused'
+            db.execute('UPDATE drafts SET status=?,trashed_from=NULL,updated=? WHERE id=?', (prev, time.time(), key))
+        return {'id': key, 'status': prev}
+    def purge(self, key, confirm=False):
+        if confirm is not True: raise ValueError('Permanent delete requires confirmation')
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT status FROM drafts WHERE id=?', (key,)).fetchone()
+            if not row: raise FileNotFoundError('Outbound message not found')
+            if row[0] == 'submitting': raise ValueError('Submission is in progress; it cannot be deleted now')
+            db.execute('DELETE FROM drafts WHERE id=?', (key,))
+        return {'id': key, 'status': 'deleted', 'cancelled': row[0] in ('paused', 'rejected', 'draft'), 'already_submitted': row[0] in ('accepted', 'unknown')}
     def status(self, key, status, queue=None):
         with self.db() as db: db.execute('UPDATE drafts SET status=?,queue_id=?,updated=? WHERE id=?', (status, queue, time.time(), key))
 

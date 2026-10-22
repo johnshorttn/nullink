@@ -675,6 +675,13 @@ class CombinedMail:
         account,native=self.gmail.native(key);add,remove=self.gmail.sync.adapter('gmail').read_change(read)
         self.gmail.sync.enqueue('gmail',account,native,add_ids=add,remove_ids=remove)
         return result
+    def delete(self,folder,key,confirm=False):
+        """Permanent local delete from Trash. A Gmail message is tombstoned so sync never re-imports it;
+        the Gmail copy itself stays in Gmail Trash (Gmail empties it after 30 days). Nothing is deleted at Google."""
+        if not self.gmail.reference(key):return self.local.delete(folder,key,confirm)
+        if confirm is not True:raise ValueError('Permanent delete requires confirmation')
+        if folder!='trash':raise ValueError('Move the message to Trash before deleting it permanently')
+        p=self.gmail.cache.locate(folder,key);self.gmail.forget(key);p.unlink(missing_ok=True)
     def move(self,folder,key,target):
         if not self.gmail.reference(key):return self.local.move(folder,key,target)
         result=self.gmail.cache.move(folder,key,target)

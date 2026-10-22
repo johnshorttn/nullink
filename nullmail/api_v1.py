@@ -169,7 +169,10 @@ def read(handler,path,q):
         admin(perm);return {'runs':store.history(offset)}
     if path=='rules/versions':
         admin(perm);return {'versions':store.versions(arg('id'))}
-    if path=='sent': return {'records':store.sent(actor,offset),'delivery_verified':False}
+    if path=='sent':
+        # Audit rows are kept; rows whose outbound message was trashed or permanently deleted are hidden here.
+        live={d['id']:d['status'] for d in handler.server.drafts.list()}
+        return {'records':[r for r in store.sent(actor,offset) if live.get(r['draft']) not in (None,'trashed')],'delivery_verified':False}
     raise FileNotFoundError()
 
 
