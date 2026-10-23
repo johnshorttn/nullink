@@ -45,6 +45,20 @@ def nullink(path, cookie='', body=None, client_ip='127.0.0.1', user_agent='Nullm
         return res.status,res.read(65536),cookie
     finally: conn.close()
 
+def owner_session_live(cookie):
+    """Read-only check for the open pixel: is this a live, unexpired, non-guest Nullink session?
+    Uses Nullink's loopback-only session lookup (signature + expiry, get_session without touch), so
+    it never extends the session, sets a cookie, needs CSRF or redirects. Any error counts as 'no'."""
+    value=cookie.split('=',1)[1] if cookie and '=' in cookie else ''
+    if not value: return False
+    conn=http.client.HTTPConnection('127.0.0.1',AUTH_PORT,timeout=3)
+    try:
+        conn.request('POST','/api/admin/ssh-session',json.dumps({'token':value}),{'Host':'127.0.0.1','Content-Type':'application/json'})
+        res=conn.getresponse();data=json.loads(res.read(4096))
+        return res.status==200 and isinstance(data,dict) and data.get('ok') is True
+    except Exception: return False
+    finally: conn.close()
+
 class Handler(BaseHTTPRequestHandler):
     server_version='Nullmail'
     def setup(self):
@@ -106,9 +120,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200,(STATIC/f).read_bytes(),{'/':'text/html; charset=utf-8','/composer.js':'text/javascript; charset=utf-8','/vendor/quill.js':'text/javascript; charset=utf-8','/vendor/quill.snow.css':'text/css; charset=utf-8','/app.js':'text/javascript; charset=utf-8','/workspace.js':'text/javascript; charset=utf-8','/cases.js':'text/javascript; charset=utf-8','/outbound.js':'text/javascript; charset=utf-8','/receipts.js':'text/javascript; charset=utf-8','/style.css':'text/css; charset=utf-8'}[path])
             if not write and path.startswith('/t/') and path.endswith('.gif'):
                 # Open-tracking pixel (opt-in per message). Unauthenticated; stores time only. John's own
-                # signed-in views (session cookie present) are not counted.
+                # signed-in views (a valid, unexpired session; read-only lookup) are not counted.
                 import receipts
-                if not self.cookie():
+                if not owner_session_live(self.cookie()):
                     with MUTATION, api_v1.state(self.server).db() as db:receipts.record_open(db,path[3:-4])
                 return self.reply(200,receipts.PIXEL,'image/gif',{'Cache-Control':'no-store, private','Cross-Origin-Resource-Policy':'cross-origin'})
             if not write and path=='/health': return self.reply(200,{'ok':True,'service':'nullmail'})

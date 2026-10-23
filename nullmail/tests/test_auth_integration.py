@@ -47,3 +47,23 @@ class AuthIntegration(unittest.TestCase):
         self.assertEqual(status,401)
 
 if __name__=='__main__':unittest.main()
+
+class PixelSessionCheck(AuthIntegration):
+    """owner_session_live against real Nullink auth state: valid, fake, expired, none; never touches."""
+    def _token(self):
+        token,_=nullink.create_session('127.0.0.1','pixel test','test');return token
+    def test_valid_session_is_live_and_untouched(self):
+        token=self._token();before=nullink.load_sessions()
+        self.assertTrue(app.owner_session_live(app.COOKIE_NAME+'='+token))
+        self.assertEqual(nullink.load_sessions(),before)
+    def test_fake_cookie_is_not_live(self):
+        token=self._token();v,sid,sig=token.split('.')
+        self.assertFalse(app.owner_session_live(app.COOKIE_NAME+'='+'.'.join([v,sid,'0'*len(sig)])))
+        self.assertFalse(app.owner_session_live(app.COOKIE_NAME+'=forged'))
+    def test_expired_session_is_not_live(self):
+        token=self._token();s=nullink.load_sessions()
+        for r in s.values():r['expires_at']=1
+        nullink.save_sessions(s)
+        self.assertFalse(app.owner_session_live(app.COOKIE_NAME+'='+token))
+    def test_no_cookie_is_not_live(self):
+        self.assertFalse(app.owner_session_live(''))

@@ -114,6 +114,20 @@ class HttpReceiptTests(unittest.TestCase):
         for p in ('/api/retract','/api/mdn/respond'):self.assertEqual(self.req(p,{},csrf='bad')[0],403)
     def test_pixel_is_public_gif_and_unknown_tokens_ignored(self):
         s,b,h=self.req('/t/'+'A'*24+'.gif',cookie='');self.assertEqual(s,200);self.assertTrue(b[:6]==b'GIF89a' or b[:6]==b'GIF87a')
+    def test_pixel_counts_unless_live_session_and_is_identical(self):
+        import api_v1
+        with api_v1.state(self.server).db() as db:receipts.record_outbound(db,'D1','<d1@nm>',None,0,0,'P'*24,['x@example.com'],'test')
+        def opens():
+            with api_v1.state(self.server).db() as db:return db.execute("SELECT COUNT(*) FROM receipt_events WHERE draft='D1' AND kind='open'").fetchone()[0]
+        bodies=[];clock=[1000.0]
+        with patch('receipts.time.time',side_effect=lambda:clock[0]):
+            for cookie,live,want in [('',False,1),('__Host-nullink_session=fake',False,2),('__Host-nullink_session=expired',False,3),('__Host-nullink_session=valid',True,3)]:
+                clock[0]+=61
+                with patch('app.owner_session_live',return_value=live) as m:
+                    s,b,h=self.req('/t/'+'P'*24+'.gif',cookie=cookie)
+                self.assertEqual((s,opens()),(200,want),cookie);bodies.append(b);self.assertEqual(h['Cache-Control'],'no-store, private')
+        s,b,_=self.req('/t/'+'Z'*24+'.gif',cookie='');bodies.append(b)
+        self.assertTrue(all(x==receipts.PIXEL for x in bodies))
     def test_mdn_respond_requires_confirm_and_request(self):
         key=self.server.mail.listing()[0]['id']
         self.assertEqual(self.req('/api/mdn/respond',{'folder':'inbox','id':key,'action':'send'})[0],400)
