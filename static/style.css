@@ -2754,14 +2754,13 @@ body.is-guest #guest-audit-btn { display: none !important; }
 .fm-row--older .fm-row__name, .fm-row--older .fm-row__size, .fm-row--older .fm-row__meta { opacity: .62; }
 .fm-row--older:hover .fm-row__name, .fm-row--older:hover .fm-row__meta, .fm-row--older:hover .fm-row__size { opacity: .9; }
 .fm-row--search .fm-dates { color: var(--color-text-muted); font-size: var(--text-xs); }
-@media (max-width: 767px) {
+/* Narrow file lists (phones, and the Files pane beside chat/workspace): name gets the full row, both dates on a second line. */
+#fm-list { container-type: inline-size; container-name: fmlist; }
+@container fmlist (max-width: 680px) {
   .fm-row { grid-template-columns: 24px minmax(0, 1fr) auto 36px; grid-template-rows: auto auto; row-gap: 0; }
   .fm-row__check { grid-row: 1 / span 2; }
   .fm-row__more { grid-column: 4; grid-row: 1 / span 2; }
-  .fm-row__meta { display: block; grid-column: 2 / 4; grid-row: 2; margin-top: -4px; padding-bottom: 2px; }
+  .fm-row__meta { display: block; grid-column: 2 / 4; grid-row: 2; margin-top: -4px; padding-bottom: 2px; white-space: normal; }
   .fm-row--folder .fm-row__meta { display: none; }
-  /* On phones show just the date matching the sort (Created when sorting by created, otherwise Added). */
-  .fm-list--sort-created .fm-date--added, .fm-list:not(.fm-list--sort-created) .fm-date--created,
-  .fm-row__meta .fm-date-sep { display: none; }
-  .fm-sort-btn { flex: 1 1 100%; }
 }
+@media (max-width: 767px) { .fm-sort-btn { flex: 1 1 100%; } }
