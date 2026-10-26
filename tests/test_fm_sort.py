@@ -31,3 +31,11 @@ class FmSortWiringTests(unittest.TestCase):
         app = (ROOT / "static" / "app.js").read_text()
         self.assertIn('fd.append("last_modified"', app)
         self.assertIn("labelFilter: () =>", app)
+
+    def test_manager_catches_up_if_first_file_load_finished_early(self):
+        # Regression: app.js's first /api/files load could finish before files-manager.js ran,
+        # so the "nl:files-loaded" event was missed and the Files list stayed empty.
+        app = (ROOT / "static" / "app.js").read_text()
+        js = (ROOT / "static" / "files-manager.js").read_text()
+        self.assertLess(app.index("window.NL.filesLoaded = true"), app.index('new CustomEvent("nl:files-loaded")'))
+        self.assertIn("if (window.NL && window.NL.filesLoaded) refresh();", js)

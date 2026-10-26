@@ -1814,6 +1814,8 @@ btnSplit.addEventListener("click", () => {
         });
       }
       renderFiles();
+      // Flag for scripts that load after this first fetch completes (files-manager.js checks it at init).
+      if (window.NL) window.NL.filesLoaded = true;
       document.dispatchEvent(new CustomEvent("nl:files-loaded"));
     } catch { /* ignore */ }
   }

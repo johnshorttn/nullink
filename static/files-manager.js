@@ -727,6 +727,8 @@
   if (back) back.addEventListener("click", () => { showManager(); refresh(); });
   document.addEventListener("nl:editor-open", () => panel.classList.add("fm-editing"));
   document.addEventListener("nl:files-loaded", refresh);
+  // app.js may have finished its first file load before this script ran (race on slow script loads).
+  if (window.NL && window.NL.filesLoaded) refresh();
   renderSortBtn();
 
   window.NLFiles = { refresh, go, state };
