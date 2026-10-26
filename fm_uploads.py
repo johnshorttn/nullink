@@ -190,6 +190,9 @@ def _create(h) -> bool:
     uid = uuid.uuid4().hex[:24]
     meta = {"upload_id": uid, "name": name, "size": size, "folder": folder,
             "created_at": S.iso_now()}
+    lm = b.get("last_modified")
+    if isinstance(lm, (int, float)) and not isinstance(lm, bool):
+        meta["last_modified"] = int(lm)  # browser File.lastModified (ms); validated when stamped
     _save(meta)
     _part_path(uid).touch(mode=0o600)
     meta["received"] = 0
@@ -267,6 +270,8 @@ def _complete(h, uid: str) -> bool:
             "labels": labels, "size": meta["size"], "updated_at": S.iso_now(), "source": "upload",
             "folder": meta.get("folder") or "", "trashed_at": None, "fm": fm.FM_VERSION,
         }
+        import file_dates
+        file_dates.stamp(entry, exif_path=dest, client_ms=meta.get("last_modified"), now_iso=entry["updated_at"])
         with fm._lock:
             files = S.load_files()
             files.append(entry)
