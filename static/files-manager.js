@@ -39,6 +39,15 @@
     const d = new Date(s);
     return isNaN(d) ? "" : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   }
+  // Compact form for row dates: drop the year when it is the current year (full date stays in the tooltip).
+  function fmtShort(s) {
+    if (!s) return "";
+    const d = new Date(s);
+    if (isNaN(d)) return "";
+    const o = { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+    if (d.getFullYear() !== new Date().getFullYear()) o.year = "numeric";
+    return d.toLocaleString([], o);
+  }
   const leaf = (f) => (f ? f.split("/").pop() : "Files");
   const parentOf = (f) => (f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "");
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -226,14 +235,17 @@
     const r = sortBtn.getBoundingClientRect();
     m.style.right = Math.max(8, window.innerWidth - r.right) + "px";
     m.style.top = r.bottom + 4 + "px";
+    // Keep the menu on screen on narrow phones (it is wider than the button).
+    const mr = m.getBoundingClientRect();
+    if (mr.left < 8) { m.style.right = "auto"; m.style.left = "8px"; }
   });
 
   const CREATED_SRC = { exif: "from photo EXIF", client: "file's modified time from your device", source_mtime: "source file's timestamp",
     file_mtime: "stored file's timestamp", existing: "recorded at creation", added: "unknown — same as date added" };
   function dateMeta(f) {
     const wrap = el("span", "fm-dates");
-    const c = el("span", "fm-date fm-date--created", "Created " + fmtDate(f.created_at || f.added_at || f.updated_at));
-    const a = el("span", "fm-date fm-date--added", "Added " + fmtDate(f.added_at || f.updated_at));
+    const c = el("span", "fm-date fm-date--created", "Created " + fmtShort(f.created_at || f.added_at || f.updated_at));
+    const a = el("span", "fm-date fm-date--added", "Added " + fmtShort(f.added_at || f.updated_at));
     wrap.append(c, el("span", "fm-date-sep", " · "), a);
     wrap.title = `Created: ${fmtDate(f.created_at || f.added_at || f.updated_at)} (${CREATED_SRC[f.created_src] || "unknown"})\nAdded to Files: ${fmtDate(f.added_at || f.updated_at)}\nLast modified: ${fmtDate(f.updated_at)}`;
     return wrap;
