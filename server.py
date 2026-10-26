@@ -4561,9 +4561,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._vault_view(urllib.parse.unquote(m.group(1)), rec)
 
-        m = re.match(r"^/api/admin/vault(?:/([^/]+))?$", path)
-        if m:
-            return self._admin_vault_read(m.group(1))
 
 
         if path == "/api/playground/chatgpt":
@@ -5196,27 +5193,6 @@ class Handler(BaseHTTPRequestHandler):
         vault_audit("decrypt_view", id=vid, ip=ip, ua=ua, session=rec.get("id"))
         remaining = int(SSH_STEPUP_WINDOW_SEC - (time.time() - float(rec.get("ssh_stepup_at") or 0)))
         return self._json(200, {"item": item, "locked": False, "unlocked_for_sec": max(0, remaining)})
-
-    def _admin_vault_read(self, vid: str | None) -> None:
-        """Loopback-only (Morc's server-side access through the app). Audited, no content logged."""
-        if not is_localhost(self) or self.headers.get("Authorization") is not None:
-            return self._json(403, {"error": "localhost_only"})
-        if not vid:
-            items = list_vault_snippets()
-            return self._json(200, {"items": items, "count": len(items)})
-        vid = urllib.parse.unquote(vid)
-        try:
-            item = load_vault_snippet(vid, decrypt=True)
-        except VaultKeyUnavailable:
-            return self._json(503, {"error": "vault_key_unavailable"})
-        except VaultIntegrityError:
-            vault_audit("integrity_failure", id=vid, ip="local", ua="admin-loopback")
-            return self._json(500, {"error": "vault_integrity"})
-        if not item:
-            return self._json(404, {"error": "not_found"})
-        vault_audit("decrypt_view", id=vid, ip="local", ua=str(self.headers.get("User-Agent") or "admin-loopback")[:160],
-                    actor="morc-local")
-        return self._json(200, {"item": item})
 
     def _vault_create(self) -> None:
         if not self._vault_owner():
