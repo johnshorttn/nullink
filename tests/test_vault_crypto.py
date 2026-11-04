@@ -1,5 +1,5 @@
 """Vault encryption at rest (2026-10-19): AES-256-GCM bodies, TOTP step-up to view, masked list,
-guests / AI tokens refused, tamper detection, loopback admin read, audit without content."""
+guests / AI tokens refused, tamper detection, no loopback admin route (removed 2026-10-26), audit without content."""
 import base64
 import json
 import os
@@ -186,14 +186,40 @@ class VaultCryptoTests(AuthBase):
         self.assertEqual(st, 401)
         self.assertNotIn(b"hunter2", data)
 
-    def test_admin_loopback_read_for_morc(self):
-        st, _, js, _ = self.req(f"/api/admin/vault/{self.entry['id']}", xff=None, proto=None, host="127.0.0.1")
-        self.assertEqual(st, 200)
-        self.assertEqual(js["item"]["body"], SECRET_BODY)
-        st, _, _, data = self.req(f"/api/admin/vault/{self.entry['id']}")  # via proxy headers
-        self.assertEqual(st, 403)
-        self.assertNotIn(b"hunter2", data)
+    def test_admin_vault_routes_removed(self):
+        """/api/admin/vault and /api/admin/vault/<id> no longer exist: 404 from loopback with or
+        without proxy / auth / token headers, and never any title or content."""
+        vid = self.entry["id"]
+        variants = [
+            dict(xff=None, proto=None, host="127.0.0.1"),
+            dict(xff=None, proto=None, host="localhost"),
+            dict(xff=None, proto=None, host="127.0.0.1", headers={"Authorization": "Bearer x"}),
+            dict(xff=None, proto=None, host="127.0.0.1", headers={"X-Nullink-Admin-Token": "x" * 48}),
+            dict(),  # via proxy headers
+            dict(cookie=self.owner),
+        ]
+        for path in ("/api/admin/vault", f"/api/admin/vault/{vid}", "/api/admin/vault/"):
+            for kw in variants:
+                st, _, _, data = self.req(path, **kw)
+                self.assertEqual(st, 404, (path, kw))
+                self.assertNotIn(b"hunter2", data)
+                self.assertNotIn(b"Auth Backup codes", data)
+        audit = server.VAULT_AUDIT_FILE.read_text() if server.VAULT_AUDIT_FILE.exists() else ""
+        self.assertNotIn("decrypt_view", audit)
 
+    def test_admin_vault_handler_gone(self):
+        self.assertFalse(hasattr(server.Handler, "_admin_vault_read"))
+
+    def test_owner_list_body_is_mask_not_ciphertext(self):
+        """The `body` field in list responses is the fixed mask, never data or ciphertext."""
+        st, _, js, data = self.req("/api/vault", cookie=self.owner)
+        self.assertEqual(st, 200)
+        self.assertTrue(js["items"])
+        for it in js["items"]:
+            self.assertEqual(it["body"], server.VAULT_MASK)
+            self.assertTrue(it["locked"])
+            self.assertNotIn("enc", it)
+        self.assertNotIn(b"hunter2", data)
 
 if __name__ == "__main__":
     unittest.main()

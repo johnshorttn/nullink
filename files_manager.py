@@ -163,8 +163,35 @@ def migrate() -> dict:
 
 
 def _view(e: dict) -> dict:
-    return {k: e.get(k) for k in ("id", "name", "path", "labels", "size", "updated_at", "source",
-                                  "folder", "trashed_at")} | {"preview": preview_kind(e)}
+    v = {k: e.get(k) for k in ("id", "name", "path", "labels", "size", "updated_at", "source",
+                               "folder", "trashed_at", "added_at", "created_at", "created_src")}
+    v["added_at"] = v["added_at"] or e.get("updated_at")
+    if not v["created_at"]:
+        v["created_at"], v["created_src"] = v["added_at"], "added"
+    return v | {"preview": preview_kind(e)}
+
+
+def backfill_dates() -> dict:
+    """Idempotent: add added_at/created_at to registry entries that lack them (see file_dates).
+    Backs up files.json once (files.json.bak-dates-*) before the first write."""
+    import file_dates
+    with _lock:
+        ff = S.FILES_FILE
+        if not ff.exists():
+            return {"changed": 0, "backup": None}
+        files = S.load_files()
+        changed = file_dates.backfill(files, safe_entry_path)
+        backup = None
+        if changed and not sorted(ff.parent.glob("files.json.bak-dates-*")):
+            backup = ff.with_name(f"files.json.bak-dates-{time.strftime('%Y%m%d-%H%M%S')}")
+            shutil.copy2(ff, backup)
+            try:
+                os.chmod(backup, 0o600)
+            except OSError:
+                pass
+        if changed:
+            S.save_files(files)
+        return {"changed": changed, "backup": backup.name if backup else None}
 
 
 def preview_kind(e: dict) -> str:

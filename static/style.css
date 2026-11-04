@@ -2735,3 +2735,32 @@ body.is-guest #guest-audit-btn { display: none !important; }
 .bots-toggle[hidden] { display: none; }
 .bot-card.is-hidden { opacity: 0.6; }
 .bot-hidden-tag { font-size: 0.75em; }
+
+/* ---- Files: sort control, created/added dates, "Latest" of similar names (fs1) ---- */
+.fm-sort-btn { white-space: nowrap; }
+.fm-menu--sort { min-width: 220px; }
+.fm-menu__head { padding: var(--space-1) var(--space-3); color: var(--color-text-muted); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .04em; }
+.fm-menu__sep { height: 1px; margin: var(--space-1) 0; background: var(--color-border); }
+.fm-menu__item--radio { padding-left: calc(var(--space-3) + 18px); position: relative; }
+.fm-menu__item--radio.is-checked::before { content: "✓"; position: absolute; left: var(--space-3); color: var(--color-brand); font-weight: 700; }
+.fm-row { grid-template-columns: 24px minmax(0, 1fr) 80px minmax(170px, 300px) 32px; }
+.fm-dates { display: inline; }
+.fm-date-sep { color: var(--color-text-muted); }
+.fm-list--sort-created .fm-date--created, .fm-list--sort-added .fm-date--added { color: var(--color-text-secondary); font-weight: 600; }
+.fm-row__where { color: var(--color-text-secondary); }
+.fm-badge-latest { flex: 0 0 auto; margin-left: var(--space-1); padding: 1px 7px; border-radius: 999px; font-size: var(--text-xs); font-weight: 700;
+  line-height: 1.5; background: var(--color-brand-soft); color: var(--color-brand); border: 1px solid var(--color-brand); }
+.fm-row--latest { box-shadow: inset 3px 0 0 var(--color-brand); }
+.fm-row--older .fm-row__name, .fm-row--older .fm-row__size, .fm-row--older .fm-row__meta { opacity: .62; }
+.fm-row--older:hover .fm-row__name, .fm-row--older:hover .fm-row__meta, .fm-row--older:hover .fm-row__size { opacity: .9; }
+.fm-row--search .fm-dates { color: var(--color-text-muted); font-size: var(--text-xs); }
+/* Narrow file lists (phones, and the Files pane beside chat/workspace): name gets the full row, both dates on a second line. */
+#fm-list { container-type: inline-size; container-name: fmlist; }
+@container fmlist (max-width: 680px) {
+  .fm-row { grid-template-columns: 24px minmax(0, 1fr) auto 36px; grid-template-rows: auto auto; row-gap: 0; }
+  .fm-row__check { grid-row: 1 / span 2; }
+  .fm-row__more { grid-column: 4; grid-row: 1 / span 2; }
+  .fm-row__meta { display: block; grid-column: 2 / 4; grid-row: 2; margin-top: -4px; padding-bottom: 2px; white-space: normal; }
+  .fm-row--folder .fm-row__meta { display: none; }
+}
+@media (max-width: 767px) { .fm-sort-btn { flex: 1 1 100%; } }

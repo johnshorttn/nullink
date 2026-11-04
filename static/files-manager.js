@@ -16,6 +16,11 @@
   };
   const state = { folders: [], files: [], trash: [], cwd: "", trashView: false, sel: new Set(), open: new Set([""]) };
   const NL = () => window.NL || {};
+  const FS = window.NLFmSort;
+  const SORT_KEY = "nl.fm.sort";
+  state.sort = (() => { try { return FS.normSort(JSON.parse(localStorage.getItem(SORT_KEY) || "null")); } catch (_) { return FS.normSort(null); } })();
+  const isDefaultSort = () => state.sort.key === FS.DEFAULT.key && state.sort.dir === FS.DEFAULT.dir;
+  const labelFilter = () => { try { return (NL().labelFilter && NL().labelFilter()) || []; } catch (_) { return []; } };
 
   function status(msg, isErr) {
     els.status.textContent = msg || "";
@@ -33,6 +38,15 @@
     if (!s) return "";
     const d = new Date(s);
     return isNaN(d) ? "" : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  }
+  // Compact form for row dates: drop the year when it is the current year (full date stays in the tooltip).
+  function fmtShort(s) {
+    if (!s) return "";
+    const d = new Date(s);
+    if (isNaN(d)) return "";
+    const o = { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+    if (d.getFullYear() !== new Date().getFullYear()) o.year = "numeric";
+    return d.toLocaleString([], o);
   }
   const leaf = (f) => (f ? f.split("/").pop() : "Files");
   const parentOf = (f) => (f.includes("/") ? f.slice(0, f.lastIndexOf("/")) : "");
@@ -77,6 +91,7 @@
   }
 
   function render() {
+    renderSortBtn();
     if (state.search) return renderSearch();
     renderCrumbs();
     renderTree(els.tree);
@@ -91,6 +106,17 @@
   function renderCrumbs() {
     els.crumbs.innerHTML = "";
     if (state.trashView) { els.crumbs.appendChild(el("span", "fm-crumb fm-crumb--cur", "Trash")); return; }
+    const lf = labelFilter();
+    if (lf.length) {
+      const names = lf.map((l) => (NL().labelName ? NL().labelName(l) : l)).join(", ");
+      els.crumbs.appendChild(el("span", "fm-crumb fm-crumb--cur", `Label: ${names}`));
+      if (NL().clearLabelFilter) {
+        const clr = el("button", "ghost tiny", "Show all files"); clr.type = "button";
+        clr.addEventListener("click", () => NL().clearLabelFilter());
+        els.crumbs.appendChild(clr);
+      }
+      return;
+    }
     const parts = state.cwd ? state.cwd.split("/") : [];
     const items = [["", "Files"]].concat(parts.map((p, i) => [parts.slice(0, i + 1).join("/"), p]));
     items.forEach(([path, label], i) => {
@@ -149,11 +175,96 @@
   }
 
   function rowsForView() {
-    if (state.trashView) return { folders: [], files: state.trash.slice().sort((a, b) => (b.trashed_at || "").localeCompare(a.trashed_at || "")) };
+    if (state.trashView) {
+      // Trash keeps "most recently deleted first" unless a non-default sort is chosen.
+      const t = state.trash.slice();
+      return { folders: [], files: isDefaultSort() ? t.sort((a, b) => (b.trashed_at || "").localeCompare(a.trashed_at || "")) : FS.sortFiles(t, state.sort) };
+    }
+    const lf = labelFilter();
+    if (lf.length) {
+      // Label filter (e.g. ChatGPT Playground): flat list of matching files across all folders.
+      const files = state.files.filter((f) => (f.labels || []).some((l) => lf.includes(l)));
+      return { folders: [], files: FS.sortFiles(files, state.sort), flat: true };
+    }
+    const folders = children(state.cwd);
+    if (state.sort.key === "name" && state.sort.dir === "desc") folders.reverse();
     return {
-      folders: children(state.cwd),
-      files: state.files.filter((f) => (f.folder || "") === state.cwd).sort((a, b) => String(a.name).localeCompare(String(b.name))),
+      folders,
+      files: FS.sortFiles(state.files.filter((f) => (f.folder || "") === state.cwd), state.sort),
     };
+  }
+
+  // ---- sort control (Name / Extension / Date added / Date created, asc|desc; saved in localStorage) ----
+  const sortBtn = $("fm-sort");
+  const arrow = (s) => (s.key === "name" || s.key === "ext" ? (s.dir === "asc" ? "A–Z" : "Z–A") : (s.dir === "asc" ? "oldest first" : "newest first"));
+  function renderSortBtn() {
+    if (!sortBtn) return;
+    sortBtn.textContent = `Sort: ${FS.SORTS[state.sort.key]} · ${arrow(state.sort)}`;
+    sortBtn.title = "Sort files" + (state.search && isDefaultSort() ? " (search results stay in relevance order with the default sort)" : "");
+    const list = els.list;
+    ["name", "ext", "added", "created"].forEach((k) => list.classList.toggle("fm-list--sort-" + k, state.sort.key === k));
+  }
+  function setSort(next) {
+    state.sort = FS.normSort(next);
+    try { localStorage.setItem(SORT_KEY, JSON.stringify(state.sort)); } catch (_) {}
+    render();
+  }
+  if (sortBtn) sortBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const was = root.querySelector(".fm-menu--sort");
+    closeMenus();
+    if (was) return;
+    const m = el("div", "fm-menu fm-menu--sort");
+    m.setAttribute("role", "menu");
+    m.setAttribute("aria-label", "Sort files");
+    const item = (label, checked, fn) => {
+      const it = el("button", "fm-menu__item fm-menu__item--radio" + (checked ? " is-checked" : ""), label);
+      it.type = "button";
+      it.setAttribute("role", "menuitemradio");
+      it.setAttribute("aria-checked", String(checked));
+      it.addEventListener("click", (ev) => { ev.stopPropagation(); fn(); closeMenus(); });
+      m.appendChild(it);
+    };
+    m.appendChild(el("div", "fm-menu__head", "Sort by"));
+    Object.keys(FS.SORTS).forEach((k) => item(FS.SORTS[k], state.sort.key === k, () => setSort({ key: k, dir: k === "added" || k === "created" ? (state.sort.key === k ? state.sort.dir : "desc") : (state.sort.key === k ? state.sort.dir : "asc") })));
+    m.appendChild(el("div", "fm-menu__sep"));
+    const dates = state.sort.key === "added" || state.sort.key === "created";
+    item(dates ? "Oldest first" : "Ascending (A–Z)", state.sort.dir === "asc", () => setSort({ key: state.sort.key, dir: "asc" }));
+    item(dates ? "Newest first" : "Descending (Z–A)", state.sort.dir === "desc", () => setSort({ key: state.sort.key, dir: "desc" }));
+    root.appendChild(m);
+    const r = sortBtn.getBoundingClientRect();
+    m.style.right = Math.max(8, window.innerWidth - r.right) + "px";
+    m.style.top = r.bottom + 4 + "px";
+    // Keep the menu on screen on narrow phones (it is wider than the button).
+    const mr = m.getBoundingClientRect();
+    if (mr.left < 8) { m.style.right = "auto"; m.style.left = "8px"; }
+  });
+
+  const CREATED_SRC = { exif: "from photo EXIF", client: "file's modified time from your device", source_mtime: "source file's timestamp",
+    file_mtime: "stored file's timestamp", existing: "recorded at creation", added: "unknown — same as date added" };
+  function dateMeta(f) {
+    const wrap = el("span", "fm-dates");
+    const c = el("span", "fm-date fm-date--created", "Created " + fmtShort(f.created_at || f.added_at || f.updated_at));
+    const a = el("span", "fm-date fm-date--added", "Added " + fmtShort(f.added_at || f.updated_at));
+    wrap.append(c, el("span", "fm-date-sep", " · "), a);
+    wrap.title = `Created: ${fmtDate(f.created_at || f.added_at || f.updated_at)} (${CREATED_SRC[f.created_src] || "unknown"})\nAdded to Files: ${fmtDate(f.added_at || f.updated_at)}\nLast modified: ${fmtDate(f.updated_at)}`;
+    return wrap;
+  }
+  /* "Latest" badge for the newest of several near-identical names (by date added). */
+  function markSimilar(li, f, groups) {
+    const g = groups && groups.get(f.id);
+    if (!g) return;
+    const nm = li.querySelector(".fm-row__name");
+    if (g.latest) {
+      li.classList.add("fm-row--latest");
+      const b = el("span", "fm-badge-latest", "Latest");
+      b.title = `Newest of ${g.n} similar files`;
+      nm.appendChild(b);
+      nm.title = `${f.name} — newest of ${g.n} similar files`;
+    } else {
+      li.classList.add("fm-row--older");
+      nm.title = `${f.name} — older version (newest of ${g.n} similar files is marked Latest)`;
+    }
   }
 
   function icon(f) {
@@ -163,10 +274,11 @@
   }
 
   function renderList() {
-    const { folders, files } = rowsForView();
+    const { folders, files, flat } = rowsForView();
+    const groups = state.trashView ? null : FS.similarGroups(files);
     els.list.innerHTML = "";
     els.empty.hidden = folders.length + files.length > 0;
-    els.empty.textContent = state.trashView ? "Trash is empty." : "This folder is empty. Drop files here or use Upload.";
+    els.empty.textContent = state.trashView ? "Trash is empty." : flat ? "No files with this label." : "This folder is empty. Drop files here or use Upload.";
     folders.forEach((f) => {
       const li = row("folder:" + f, "📁", leaf(f), "Folder", "");
       li.classList.add("fm-row--folder");
@@ -183,8 +295,10 @@
       els.list.appendChild(li);
     });
     files.forEach((f) => {
-      const meta = state.trashView ? `${f.folder ? f.folder + " · " : ""}deleted ${fmtDate(f.trashed_at)}` : fmtDate(f.updated_at);
+      const meta = state.trashView ? `${f.folder ? f.folder + " · " : ""}deleted ${fmtDate(f.trashed_at)}` : dateMeta(f);
       const li = row("file:" + f.id, icon(f), f.name, fmtSize(f.size), meta);
+      if (flat) li.querySelector(".fm-row__meta").prepend(el("span", "fm-row__where", (f.folder || "Files") + " · "));
+      markSimilar(li, f, groups);
       li.querySelector(".fm-row__name").addEventListener("click", () => (state.trashView ? null : openItem(f)));
       if (!state.trashView) {
         li.draggable = true;
@@ -221,7 +335,8 @@
     nm.type = "button";
     nm.append(el("span", "fm-row__icon", ic), el("span", "fm-row__label", name));
     const sz = el("span", "fm-row__size", size);
-    const mt = el("span", "fm-row__meta", meta);
+    const mt = el("span", "fm-row__meta");
+    if (meta instanceof Node) mt.appendChild(meta); else mt.textContent = meta;
     li.append(cb, nm, sz, mt);
     return li;
   }
@@ -424,7 +539,7 @@
     let up = null;
     if (store[fp]) { try { up = await api(`/api/fm/uploads/${store[fp]}`); } catch (_) { up = null; } }
     if (!up) {
-      up = await api("/api/fm/uploads", { json: { name: f.name, size: f.size, folder } });
+      up = await api("/api/fm/uploads", { json: { name: f.name, size: f.size, folder, last_modified: f.lastModified || undefined } });
       const s2 = upStore(); s2[fp] = up.upload_id; upSave(s2);
     }
     const id = up.upload_id, cs = up.chunk_size || 8388608;
@@ -499,7 +614,11 @@
     els.trashBar.hidden = true;
     els.empty.hidden = d.results.length > 0;
     els.empty.textContent = d.results.length ? "" : "No matches.";
-    d.results.forEach((r) => {
+    // Default sort keeps relevance order; any other sort orders file hits (folders first).
+    const fileHits = d.results.filter((r) => r.type !== "folder");
+    const ordered = isDefaultSort() ? d.results : d.results.filter((r) => r.type === "folder").concat(FS.sortFiles(fileHits, state.sort));
+    const groups = FS.similarGroups(fileHits);
+    ordered.forEach((r) => {
       const li = el("li", "fm-row fm-row--search");
       const isF = r.type === "folder";
       const name = el("button", "fm-row__name", (isF ? "📁 " : "📄 ") + (isF ? r.folder.split("/").pop() : r.name));
@@ -510,6 +629,7 @@
       });
       const where = el("span", "fm-row__meta", (isF ? r.folder : (r.folder || "Files")) + (r.match === "content" ? ` · line ${r.line}` : " · name"));
       li.appendChild(name); li.appendChild(where);
+      if (!isF) { li.appendChild(dateMeta(r)); markSimilar(li, r, groups); }
       if (r.snippet) li.appendChild(el("div", "fm-snippet", r.snippet));
       els.list.appendChild(li);
     });
@@ -607,6 +727,9 @@
   if (back) back.addEventListener("click", () => { showManager(); refresh(); });
   document.addEventListener("nl:editor-open", () => panel.classList.add("fm-editing"));
   document.addEventListener("nl:files-loaded", refresh);
+  // app.js may have finished its first file load before this script ran (race on slow script loads).
+  if (window.NL && window.NL.filesLoaded) refresh();
+  renderSortBtn();
 
   window.NLFiles = { refresh, go, state };
   window.NLFiles = { go, rerender: () => render(), cwd: () => state.cwd, search: runSearch, share: (id) => { const f = state.files.find((x) => x.id === id); if (f) shareDialog(f); } };

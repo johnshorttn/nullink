@@ -1814,6 +1814,8 @@ btnSplit.addEventListener("click", () => {
         });
       }
       renderFiles();
+      // Flag for scripts that load after this first fetch completes (files-manager.js checks it at init).
+      if (window.NL) window.NL.filesLoaded = true;
       document.dispatchEvent(new CustomEvent("nl:files-loaded"));
     } catch { /* ignore */ }
   }
@@ -2026,6 +2028,7 @@ btnSplit.addEventListener("click", () => {
     if (!list.length) return;
     const fd = new FormData();
     for (const f of list) fd.append("file", f);
+    fd.append("last_modified", list.map((f) => f.lastModified || "").join(","));
     const labs = labelFilterSet.size ? [...labelFilterSet] : ["inbox"];
     fd.append("labels", labs.join(","));
     try {
@@ -3415,6 +3418,11 @@ btnSplit.addEventListener("click", () => {
 
 
   // Files manager (static/files-manager.js) reuses the editor, Ask Morc and step-up flow.
+  window.NL = Object.assign(window.NL || {}, {
+    labelFilter: () => [...labelFilterSet],
+    labelName: (id) => (labels.find((l) => l.id === id) || {}).name || id,
+    clearLabelFilter: () => { labelFilterSet.clear(); renderLabels(); loadFiles(); },
+  });
   window.NL = Object.assign(window.NL || {}, { openFile, loadFiles, stepUpFetch, setMode, showAuth, saveFile,
     isEditorDirty: () => editorOpen && editor.value !== savedContent });
 

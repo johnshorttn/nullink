@@ -26,6 +26,7 @@ from pathlib import Path
 import sys as _sys
 import share_links
 import files_manager
+import file_dates
 import server_drive
 import github_drive
 import ai_rooms
@@ -485,6 +486,7 @@ def sync_playground_to_files_registry(name: str, size: int) -> dict:
             "updated_at": iso_now(),
             "source": "playground",
         }
+        file_dates.stamp(entry, src_path=playground_resolve(safe), now_iso=entry["updated_at"])
         files.insert(0, entry)
     else:
         entry["name"] = safe
@@ -994,6 +996,7 @@ def create_labeled_paste(text: str, label_id: str, name: str | None = None) -> d
         "updated_at": iso_now(),
         "source": "paste",
     }
+    file_dates.stamp(entry, now_iso=entry["updated_at"])
     files = load_files()
     files.insert(0, entry)
     save_files(files)
@@ -4153,8 +4156,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("index.html", "text/html; charset=utf-8")
         if path == "/app.js":
             return self._serve_static("app.js", "application/javascript; charset=utf-8")
-        if path == "/files-manager.js":
-            return self._serve_static("files-manager.js", "application/javascript; charset=utf-8")
+        if path in ("/files-manager.js", "/fm-sort.js"):
+            return self._serve_static(path[1:], "application/javascript; charset=utf-8")
         if path in ("/editor.js", "/sanitize.js"):
             return self._serve_static(path[1:], "application/javascript; charset=utf-8")
         if path == "/vendor/codemirror/codemirror.bundle.js":
@@ -4561,9 +4564,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._vault_view(urllib.parse.unquote(m.group(1)), rec)
 
-        m = re.match(r"^/api/admin/vault(?:/([^/]+))?$", path)
-        if m:
-            return self._admin_vault_read(m.group(1))
 
 
         if path == "/api/playground/chatgpt":
@@ -4584,6 +4584,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._guest_gate("POST", path):
             return
+        if path in ("/api/vault/deposit", "/api/vault/bot-read"):
+            import vault_bot  # scoped bot access: add-only + per-read TOTP (2026-11-04)
+            return vault_bot.handle(self, path)
         if path.startswith("/api/avatars") and avatars.handle(self, "POST", path):
             return
         if path.startswith("/api/fm") and files_manager.handle(
@@ -5197,27 +5200,6 @@ class Handler(BaseHTTPRequestHandler):
         remaining = int(SSH_STEPUP_WINDOW_SEC - (time.time() - float(rec.get("ssh_stepup_at") or 0)))
         return self._json(200, {"item": item, "locked": False, "unlocked_for_sec": max(0, remaining)})
 
-    def _admin_vault_read(self, vid: str | None) -> None:
-        """Loopback-only (Morc's server-side access through the app). Audited, no content logged."""
-        if not is_localhost(self) or self.headers.get("Authorization") is not None:
-            return self._json(403, {"error": "localhost_only"})
-        if not vid:
-            items = list_vault_snippets()
-            return self._json(200, {"items": items, "count": len(items)})
-        vid = urllib.parse.unquote(vid)
-        try:
-            item = load_vault_snippet(vid, decrypt=True)
-        except VaultKeyUnavailable:
-            return self._json(503, {"error": "vault_key_unavailable"})
-        except VaultIntegrityError:
-            vault_audit("integrity_failure", id=vid, ip="local", ua="admin-loopback")
-            return self._json(500, {"error": "vault_integrity"})
-        if not item:
-            return self._json(404, {"error": "not_found"})
-        vault_audit("decrypt_view", id=vid, ip="local", ua=str(self.headers.get("User-Agent") or "admin-loopback")[:160],
-                    actor="morc-local")
-        return self._json(200, {"item": item})
-
     def _vault_create(self) -> None:
         if not self._vault_owner():
             return
@@ -5445,6 +5427,7 @@ class Handler(BaseHTTPRequestHandler):
                 "updated_at": iso_now(),
                 "source": "upload",
             }
+            file_dates.stamp(entry, now_iso=entry["updated_at"])
             files.append(entry)
             save_files(files)
             return self._json(200, {"ok": True, "file": entry, **file_version(dest)})
@@ -5520,9 +5503,13 @@ class Handler(BaseHTTPRequestHandler):
 
         dest_dir = upload_dest_for_labels(labels)
 
+        # Optional browser File.lastModified (ms) per file, same order as the file parts.
+        lm_raw = (form.get("last_modified") or {}).get("value") if isinstance(form.get("last_modified"), dict) else None
+        last_mods = [x.strip() for x in str(lm_raw or "").split(",")]
+
         saved = []
         errors = []
-        for fileitem in file_items:
+        for idx, fileitem in enumerate(file_items):
             filename = Path(fileitem.get("filename") or "upload.bin").name
             if not allowed_upload_name(filename):
                 errors.append({"name": filename, "error": "bad_name"})
@@ -5566,6 +5553,8 @@ class Handler(BaseHTTPRequestHandler):
                 "trashed_at": None,
                 "fm": files_manager.FM_VERSION,
             }
+            file_dates.stamp(entry, exif_path=dest, now_iso=entry["updated_at"],
+                             client_ms=(last_mods[idx] or None) if idx < len(last_mods) else None)
             saved.append(entry)
 
         if not saved:
@@ -5636,6 +5625,7 @@ class Handler(BaseHTTPRequestHandler):
             "source": "registered",
             "registered_from": str(src_p),
         }
+        file_dates.stamp(entry, exif_path=src_p, src_path=src_p, now_iso=entry["updated_at"])
         files = load_files()
         files.append(entry)
         save_files(files)
@@ -6003,6 +5993,7 @@ class Handler(BaseHTTPRequestHandler):
                     "updated_at": iso_now(),
                     "source": "scratch",
                 }
+                file_dates.stamp(entry, now_iso=entry["updated_at"])
                 files.append(entry)
                 save_files(files)
                 file_out = entry
@@ -6713,6 +6704,7 @@ def main() -> None:
         print(f"ensure_chatgpt_playground_label: {exc}", flush=True)
     try:
         print(f"files_manager.migrate: {files_manager.migrate()}", flush=True)
+        print(f"files_manager.backfill_dates: {files_manager.backfill_dates()}", flush=True)
         import fm_uploads
         print(f"fm_uploads.cleanup_stale: {fm_uploads.cleanup_stale()}", flush=True)
     except Exception as exc:
