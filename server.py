@@ -4584,6 +4584,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._guest_gate("POST", path):
             return
+        if path in ("/api/vault/deposit", "/api/vault/bot-read"):
+            import vault_bot  # scoped bot access: add-only + per-read TOTP (2026-11-04)
+            return vault_bot.handle(self, path)
         if path.startswith("/api/avatars") and avatars.handle(self, "POST", path):
             return
         if path.startswith("/api/fm") and files_manager.handle(
