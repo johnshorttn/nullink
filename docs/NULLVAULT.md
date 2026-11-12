@@ -33,7 +33,7 @@ versionCode, wrong signing cert or APK hash (reported or attested), `debuggable`
 
 Release pins: `data/nullvault/release_pins.json` (example: `deploy/nullvault/release_pins.example.json`), managed with
 `python3 nullvault.py pin-add --version-code N --cert-sha256 HEX --apk-sha256 HEX [--channel test]`.
-Pinned Google roots: `nullvault_roots/google_roots.pem` (RSA root f92009e853b6b045 and "Key Attestation CA1"; matched by public key).
+Pinned Google roots: `nullvault_roots/google_roots.crt` (RSA root f92009e853b6b045 and "Key Attestation CA1"; matched by public key).
 
 Library note: X.509 parsing, ECDSA and Ed25519 use `cryptography`, already a server dependency (vault AES-GCM).
 The Android KeyDescription extension is parsed with a small stdlib DER reader in `nullvault.py`. No new dependency.

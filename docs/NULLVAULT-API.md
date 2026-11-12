@@ -30,7 +30,7 @@ johnshorttn/nullvault.
 ### 1.1 `attestation_chain`
 Array of b64 DER certificates, leaf first, as returned by `KeyStore.getCertificateChain(alias)`.
 Server checks: each cert is signed by the next; the last cert's public key equals a pinned Google
-hardware-attestation root key (`nullvault_roots/google_roots.pem`); no serial is on Google's
+hardware-attestation root key (`nullvault_roots/google_roots.crt`); no serial is on Google's
 attestation status (revocation) list; the leaf carries the KeyDescription extension
 `1.3.6.1.4.1.11129.2.1.17` and no other cert does; attestation and KeyMint security level are TEE (1)
 or StrongBox (2); `origin` = GENERATED; `attestationChallenge` = the UTF-8 bytes of the nonce string;
