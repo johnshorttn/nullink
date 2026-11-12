@@ -25,6 +25,10 @@ versionCode, wrong signing cert or APK hash (reported or attested), `debuggable`
 | Env | Default | Meaning |
 | --- | --- | --- |
 | `NULLVAULT_ENABLED` | `0` | `1` turns the routes on |
+| `NULLVAULT_LINKS` | `0` | `1` adds links + projects (sync, signed writes, discovered-site and repo suggestions) |
+| `NULLVAULT_FILES` | `0` | `1` adds device Files access (fingerprint files session, Range downloads, signed uploads/deletes) |
+| `NULLVAULT_SERVER_LABEL` | hostname | default server label for new links and discovered sites |
+| `NULLVAULT_DISCOVERY_CADDY` | `1` | `0` skips the Caddy admin API probe (then Caddyfile, then seed file) |
 | `NULLVAULT_DEVICE_CAP` | `2` | active (non-revoked) devices |
 | `NULLVAULT_PATCH_FLOOR` | `202401` | minimum attested OS patch (YYYYMM) |
 | `NULLVAULT_ALERTS` | `1` | `0` silences Slack alerts |
@@ -50,6 +54,15 @@ The Android KeyDescription extension is parsed with a small stdlib DER reader in
 5. **Append-only (John's decision 6, do at this step, not before):** after the first registration creates the file,
    `chattr +a /opt/nullink/data/nullvault/devices.jsonl` (root). The code only ever opens it with `O_APPEND`, so this
    is compatible. To rotate or repair it later, root must `chattr -a` first.
+
+## Stage 1 deploy (Links, Projects, Files; app 0.2.0-test, versionCode 2)
+1. Fast-forward `/opt/nullink` to the merge; restart Nullink. Sub-flags off -> the new routes 404, v1 app keeps working.
+2. Pins (as nullink), **keep v1**: `python3 nullvault.py pin-add --version-code 2 --version-name 0.2.0-test --channel test --cert-sha256 69a9ba1d…6dcf --apk-sha256 3049cbb4…2c9d`.
+   Without it the live server refuses 0.2.0-test with `apk_mismatch:version_not_pinned` (refused, not flagged or wiped).
+3. Add `NULLVAULT_LINKS=1` and `NULLVAULT_FILES=1` next to `NULLVAULT_ENABLED=1`; daemon-reload; restart Nullink.
+4. Optional seeds (only if neither the Caddy admin API nor the Caddyfile is readable by nullink):
+   `data/nullvault/discovered_sites.json`, `data/nullvault/repo_catalog.json` (examples in `deploy/nullvault/`).
+5. Rollback: drop the two sub-flags (routes 404, phones keep their local links) or revert the merge.
 
 ## Rollback
 - Fast: remove `NULLVAULT_ENABLED=1` (or set `0`) and restart. All routes 404 again; devices wipe at their lease end.

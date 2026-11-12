@@ -31,6 +31,7 @@ import secrets
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,7 @@ ROUTES_POST = {
     "/api/vault/sync-challenge", "/api/vault/sync", "/api/vault/device/write",
 }
 REVOKE_RE = re.compile(r"^/api/vault/devices/(dev_[0-9a-f]{16})/revoke$")
+FILES_RE = re.compile(r"^/api/vault/files(?:/session|/([A-Za-z0-9_-]{1,64})/download|/uploads/([a-f0-9]{24})(/chunk|/complete)?)?$")
 
 _lock = threading.RLock()
 _nonces: dict[str, dict] = {}
@@ -108,10 +110,12 @@ def status_file() -> Path:
 
 
 def handles(method: str, path: str) -> bool:
+    if path.startswith("/api/vault/files") and FILES_RE.match(path):
+        return method in ("GET", "POST")
     if method == "POST":
         return path in ROUTES_POST or bool(REVOKE_RE.match(path))
     if method == "GET":
-        return path == "/api/vault/devices"
+        return path in ("/api/vault/devices", "/api/vault/links")
     return False
 
 
@@ -640,9 +644,19 @@ def send_alert(text: str) -> None:  # tests patch this
 def handle(h, method: str, path: str) -> None:
     global server
     server = sys.modules[type(h).__module__]
+    import nullvault_ext as ext
+    ext.bind(sys.modules[__name__], server)
     if not enabled():
         return h._json(404, {"error": "not_found"})
-    if int(h.headers.get("Content-Length") or 0) > MAX_BODY:
+    if path.startswith("/api/vault/files"):
+        if not ext.files_enabled():
+            return h._json(404, {"error": "not_found"})
+        return _files_route(h, method, path, ext)
+    if path == "/api/vault/links":
+        if not ext.links_enabled():
+            return h._json(404, {"error": "not_found"})
+        return _admin_links(h, ext)
+    if int(h.headers.get("Content-Length") or 0) > MAX_BODY and not path.endswith("/chunk"):
         return h._json(413, {"error": "too_large"})
     try:
         if method == "GET":
@@ -847,7 +861,7 @@ def _sync_challenge(h):
     if not d:
         return
     purpose = str((h._read_json() or {}).get("purpose") or "sync")
-    if purpose not in ("sync", "write"):
+    if purpose not in ("sync", "write", "files"):
         return h._json(400, {"error": "bad_request"})
     n = nonce_issue(purpose, d["device_id"], SYNC_TTL)
     return h._json(200, {"nonce": n, "expires_in": SYNC_TTL, "purpose": purpose})
@@ -902,6 +916,12 @@ def _verify_device_request(h, purpose: str):
         _refuse(h, 403, "tamper_detected:" + ",".join(found), device_id=did, wipe=True, flag=True)
         return None
     reason, pin = check_apk(apk, att)
+    if reason == "version_not_pinned":
+        # A newer build installed before its pins were added: refuse, but don't flag or wipe the phone.
+        server.vault_audit("device_refused", device=did, reason="version_not_pinned", ip=_ctx(h)[0])
+        h._json(403, {"error": "apk_mismatch:version_not_pinned",
+                      "message": "This app version is not approved on the server yet. Try again after the server is updated."})
+        return None
     if reason:
         _refuse(h, 403, "apk_mismatch:" + reason, device_id=did, wipe=True, flag=True)
         return None
@@ -930,8 +950,10 @@ def _sync(h):
             entries.append({k: item.get(k) for k in ("id", "title", "tags", "body", "created_at", "updated_at")})
     server.vault_audit("device_sync", device=d["device_id"], count=len(entries), ip=ip, ua=ua)
     now = time.time()
+    import nullvault_ext as ext
     return h._json(200, {"entries": entries, "count": len(entries), "lease": make_lease(d["device_id"], now),
-                         "pins": pins_manifest(pin, p["apk"]["version_code"]), "server_time": int(now)})
+                         "pins": pins_manifest(pin, p["apk"]["version_code"]), "server_time": int(now),
+                         **ext.sync_extras()})
 
 
 def _write(h):
@@ -941,6 +963,9 @@ def _write(h):
     d, p, _att, _pin = r
     ip, ua = _ctx(h)
     op = p.get("op")
+    kind = p.get("kind") or "entry"
+    if kind != "entry":
+        return _write_ext(h, d, p, kind, op)
     e = p.get("entry") if isinstance(p.get("entry"), dict) else {}
     meta = lambda x: {k: x.get(k) for k in ("id", "title", "tags", "created_at", "updated_at")}  # noqa: E731
     if op == "create":
@@ -972,6 +997,74 @@ def _write(h):
     registry_append("write", device_id=d["device_id"], op=op, entry_id=saved["id"], ip=ip, ua=ua)
     server.vault_audit("device_write", device=d["device_id"], op=op, id=saved["id"], ip=ip, ua=ua)
     return h._json(200, {"ok": True, "op": op, "entry": meta(saved), "lease": make_lease(d["device_id"], time.time())})
+
+
+def _write_ext(h, d, p, kind, op):
+    import nullvault_ext as ext
+    ip, ua = _ctx(h)
+    if kind in ("link", "project"):
+        if not ext.links_enabled():
+            return h._json(404, {"error": "not_found"})
+        rec = p.get(kind) if isinstance(p.get(kind), dict) else {}
+        st, body = ext.write_record(kind, op, rec, p.get("base_updated_at"))
+        if st != 200:
+            return h._json(st, body)
+        rid = body[kind]["id"]
+    elif kind == "file":
+        if not ext.files_enabled():
+            return h._json(404, {"error": "not_found"})
+        f = p.get("file") if isinstance(p.get("file"), dict) else {}
+        if op == "upload_begin":
+            registry_append("write", device_id=d["device_id"], record="file", op=op, ip=ip, ua=ua)
+            return ext.upload_begin(h, d, f)
+        if op != "delete":
+            return h._json(400, {"error": "bad_request"})
+        rid = str(f.get("id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", rid) or not ext.file_trash(rid):
+            return h._json(404, {"error": "not_found"})
+        body = {"file": {"id": rid, "trashed": True}}
+    else:
+        return h._json(400, {"error": "bad_request"})
+    registry_append("write", device_id=d["device_id"], record=kind, op=op, entry_id=rid, ip=ip, ua=ua)
+    server.vault_audit("device_write", device=d["device_id"], kind=kind, op=op, id=rid, ip=ip, ua=ua)
+    return h._json(200, {"ok": True, "op": op, **body, "lease": make_lease(d["device_id"], time.time())})
+
+
+def _files_route(h, method, path, ext):
+    qs = urllib.parse.parse_qs(urllib.parse.urlparse(h.path).query)
+    if path == "/api/vault/files/session":
+        if method != "POST":
+            return h._json(405, {"error": "method_not_allowed"})
+        r = _verify_device_request(h, "files")
+        if not r:
+            return
+        tok, ttl = ext.files_session_issue(r[0]["device_id"])
+        server.vault_audit("device_files_session", device=r[0]["device_id"], ip=_ctx(h)[0])
+        return h._json(200, {"files_session": tok, "expires_in": ttl})
+    d = ext.files_session(h)
+    if not d:
+        return
+    m = FILES_RE.match(path)
+    fid, uid, sub = m.group(1), m.group(2), m.group(3)
+    if path == "/api/vault/files" and method == "GET":
+        return h._json(200, ext.files_list())
+    if fid and method == "GET":
+        return ext.send_file_range(h, fid, d["device_id"])
+    if uid and not sub and method == "GET":
+        return ext.upload_status(h, d, uid)
+    if uid and sub == "/chunk" and method == "POST":
+        return ext.upload_chunk(h, d, uid, qs)
+    if uid and sub == "/complete" and method == "POST":
+        return ext.upload_complete(h, d, uid)
+    return h._json(404, {"error": "not_found"})
+
+
+def _admin_links(h, ext):
+    if h._require_owner() is None:
+        return
+    disc = ext.discover()
+    return h._json(200, {"links": ext._load_list("links.json"), "projects": ext._load_list("projects.json"),
+                         "suggestions": {"sites": disc["sites"], "source": disc["source"], "repos": ext.repo_suggestions()}})
 
 
 def _admin_list(h):
