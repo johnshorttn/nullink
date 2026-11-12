@@ -27,6 +27,10 @@ versionCode, wrong signing cert or APK hash (reported or attested), `debuggable`
 | `NULLVAULT_ENABLED` | `0` | `1` turns the routes on |
 | `NULLVAULT_LINKS` | `0` | `1` adds links + projects (sync, signed writes, discovered-site and repo suggestions) |
 | `NULLVAULT_FILES` | `0` | `1` adds device Files access (fingerprint files session, Range downloads, signed uploads/deletes) |
+| `NULLVAULT_STATUS` | `0` | `1` adds the device server-status card (`GET /api/vault/status`, status-only `nvs_` tokens) and the down-alert monitor |
+| `NULLVAULT_STATUS_SERVICES` | built-in list | comma list of systemd units to show (or `data/nullvault/status_services.json`) |
+| `NULLVAULT_STATUS_MONITOR` | `1` | `0` turns off the 60 s Slack down-alert monitor (status card still works) |
+| `NULLVAULT_NOTES` | `0` | `1` adds encrypted project notes (needs `NULLVAULT_LINKS=1`) |
 | `NULLVAULT_SERVER_LABEL` | hostname | default server label for new links and discovered sites |
 | `NULLVAULT_DISCOVERY_CADDY` | `1` | `0` skips the Caddy admin API probe (then Caddyfile, then seed file) |
 | `NULLVAULT_DEVICE_CAP` | `2` | active (non-revoked) devices |
@@ -63,6 +67,24 @@ The Android KeyDescription extension is parsed with a small stdlib DER reader in
 4. Optional seeds (only if neither the Caddy admin API nor the Caddyfile is readable by nullink):
    `data/nullvault/discovered_sites.json`, `data/nullvault/repo_catalog.json` (examples in `deploy/nullvault/`).
 5. Rollback: drop the two sub-flags (routes 404, phones keep their local links) or revert the merge.
+
+## Stage 2 deploy (Status, Notes; app 0.3.0-test, versionCode 3)
+1. Fast-forward `/opt/nullink`; restart Nullink. New flags off -> `/api/vault/status*` 404, notes not in sync, v1/v2 apps unaffected.
+2. Pins (as nullink), **keep v1 and v2**: `python3 nullvault.py pin-add --version-code 3 --version-name 0.3.0-test --channel test --cert-sha256 69a9ba1d…6dcf --apk-sha256 69e368c0…b053`.
+3. Add `NULLVAULT_STATUS=1` and `NULLVAULT_NOTES=1` to the drop-in; daemon-reload; restart Nullink.
+4. Optional: `data/nullvault/token_expiry.json` (example `deploy/nullvault/token_expiry.example.json`): names, kinds and expiry dates only, never values.
+5. Rollback: drop the two flags (routes 404, monitor stops; phones keep local notes until next sync) or revert the merge.
+
+Status reads only what the `nullink` user can already read: `/proc` (uptime, load, memory), `statvfs` of `/` and
+the Nullink dir, unprivileged `systemctl show` (ActiveState/SubState only), the public TLS certificates served on
+127.0.0.1:443, and the admin seed above. **Left out (would need extra privileges):** journal errors of other units
+(adm/systemd-journal group), docker container state (docker socket), SMART/disk hardware health (root), other
+users' processes and failed-login counts (root). They are listed in the response's `omitted` field.
+
+Down alerts are **not true push**: no Firebase/FCM. The server sends a Slack DM through the existing alert path on a
+down/up transition (watched unit not active, or disk >= 95%), at most one per unit and direction per 30 min, no alert
+for the state found at start-up. The phone can opt in to a WorkManager check every 15 min (Android minimum, Doze may
+delay it) that raises a local notification.
 
 ## Rollback
 - Fast: remove `NULLVAULT_ENABLED=1` (or set `0`) and restart. All routes 404 again; devices wipe at their lease end.

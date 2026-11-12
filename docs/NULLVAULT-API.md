@@ -206,3 +206,18 @@ All under `NULLVAULT_ENABLED=1`, plus sub-flags (default OFF): `NULLVAULT_LINKS=
 
 ### Versions
 - Pins are per versionCode. A build whose versionCode has no pin is refused with 403 `apk_mismatch:version_not_pinned` but is NOT flagged or wiped (rollout ordering, not tampering). Keep the old versionCode pinned until every phone has updated.
+
+## v3 additions (2026-11-12): Server status, Notes
+
+Flags (default OFF, under `NULLVAULT_ENABLED=1`): `NULLVAULT_STATUS=1`, `NULLVAULT_NOTES=1` (notes also need `NULLVAULT_LINKS=1`).
+
+### Status (`NULLVAULT_STATUS`)
+- `GET /api/vault/status`, `Authorization: Bearer nvd_…` or `Bearer nvs_…` -> `{server_label, time, health: {ok, services_ok, down[]}, uptime_s, load[3], mem: {total, available}, disk: [{mount, total, used, free, pct}], services: [{name, active, sub, since, ok}], tokens: [{name, kind, expires_at, days_left}], omitted: [...]}`. Cached 30 s. Missing/invalid bearer 401; revoked/flagged device 403 + `wipe`.
+- `POST /api/vault/sync-challenge {"purpose":"status"}`, then `POST /api/vault/status/token` with the signed envelope -> `{status_token: "nvs_…", expires_in: 7776000}`. Stored hashed (`data/nullvault/status_tokens.json`), one per device, scoped to `GET /api/vault/status` only. For the phone's background check, so the vault stays locked.
+- `tokens` is metadata only: TLS certificate notAfter for discovered hosts (6 h cache) and `data/nullvault/token_expiry.json` (name/kind/expires_at; other fields dropped).
+- Monitor: 60 s thread, Slack DM on down/up transitions, rate-limited 30 min per unit+direction. Not push.
+
+### Notes (`NULLVAULT_NOTES`)
+- Signed write `kind: "note"`, `op: create|update|delete`, `note: {id, project_id, title, body}`, optional `base_updated_at` (409 + current note). Project must exist (404 `project_not_found`). Caps: 1000 notes, 64 KB body.
+- `data/nullvault/notes.json` holds `{id, project_id, enc, created_at, updated_at}`; `enc` is the vault-key AES-256-GCM ciphertext of `{title, body}` (AAD bound to the note id). A tampered record answers 500 `vault_integrity`.
+- Sync response gains `notes: [...]` (decrypted, to the attested device only). Deleting a project deletes its notes.

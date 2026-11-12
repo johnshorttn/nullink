@@ -1,0 +1,7 @@
+{
+  "_comment": "Example for data/nullvault/token_expiry.json (admin-maintained, nullink-readable). METADATA ONLY: a name, a kind and an expiry date. Never put a token value here; any other field is dropped before it leaves the server.",
+  "tokens": [
+    {"name": "GitHub PAT (deploy)", "kind": "github_pat", "expires_at": "2027-02-01"},
+    {"name": "Slack bot token", "kind": "slack", "expires_at": null}
+  ]
+}

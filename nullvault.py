@@ -112,6 +112,8 @@ def status_file() -> Path:
 def handles(method: str, path: str) -> bool:
     if path.startswith("/api/vault/files") and FILES_RE.match(path):
         return method in ("GET", "POST")
+    if path in ("/api/vault/status", "/api/vault/status/token"):
+        return method in ("GET", "POST")
     if method == "POST":
         return path in ROUTES_POST or bool(REVOKE_RE.match(path))
     if method == "GET":
@@ -652,6 +654,13 @@ def handle(h, method: str, path: str) -> None:
         if not ext.files_enabled():
             return h._json(404, {"error": "not_found"})
         return _files_route(h, method, path, ext)
+    if path in ("/api/vault/status", "/api/vault/status/token"):
+        import nullvault_status as st
+        st.bind(sys.modules[__name__], server)
+        try:
+            return st.route(h, method, path)
+        except LeaseKeyUnavailable:
+            return h._json(503, {"error": "lease_key_unavailable"})
     if path == "/api/vault/links":
         if not ext.links_enabled():
             return h._json(404, {"error": "not_found"})
@@ -675,6 +684,9 @@ def handle(h, method: str, path: str) -> None:
         return h._json(503, {"error": "lease_key_unavailable"})
     except server.VaultKeyUnavailable:
         return h._json(503, {"error": "vault_key_unavailable"})
+    except server.VaultIntegrityError:
+        server.vault_audit("nullvault_integrity_error", path=path)
+        return h._json(500, {"error": "vault_integrity"})
 
 
 def _ctx(h):
@@ -861,7 +873,7 @@ def _sync_challenge(h):
     if not d:
         return
     purpose = str((h._read_json() or {}).get("purpose") or "sync")
-    if purpose not in ("sync", "write", "files"):
+    if purpose not in ("sync", "write", "files", "status"):
         return h._json(400, {"error": "bad_request"})
     n = nonce_issue(purpose, d["device_id"], SYNC_TTL)
     return h._json(200, {"nonce": n, "expires_in": SYNC_TTL, "purpose": purpose})
@@ -1002,8 +1014,8 @@ def _write(h):
 def _write_ext(h, d, p, kind, op):
     import nullvault_ext as ext
     ip, ua = _ctx(h)
-    if kind in ("link", "project"):
-        if not ext.links_enabled():
+    if kind in ("link", "project", "note"):
+        if not ext.links_enabled() or (kind == "note" and not ext.notes_enabled()):
             return h._json(404, {"error": "not_found"})
         rec = p.get(kind) if isinstance(p.get(kind), dict) else {}
         st, body = ext.write_record(kind, op, rec, p.get("base_updated_at"))
@@ -1149,5 +1161,19 @@ def main(argv):
     return 0
 
 
+def _boot_status_monitor():
+    """Server status down-alerts (Stage 2): start the 60 s monitor thread when the service runs with both flags on."""
+    if not (enabled() and os.environ.get("NULLVAULT_STATUS", "0") == "1"):
+        return
+    try:
+        import nullvault_status as st
+        st.bind(sys.modules[__name__], server)
+        st.start_monitor()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]) or 0)
+else:
+    _boot_status_monitor()
