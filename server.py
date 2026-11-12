@@ -31,6 +31,7 @@ import server_drive
 import github_drive
 import ai_rooms
 import avatars
+import nullvault
 
 from phone_bridge import PhoneBridgeError, get_bridge
 
@@ -4064,6 +4065,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not_found"})
         if self._guest_gate("GET", path):
             return
+        if nullvault.handles("GET", path):
+            return nullvault.handle(self, "GET", path)  # NullVault device list; 404 unless NULLVAULT_ENABLED=1
         if path.startswith("/api/avatars") and avatars.handle(self, "GET", path):
             return
         if path.startswith("/api/fm") and files_manager.handle(self, "GET", path, qs):
@@ -4584,6 +4587,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._guest_gate("POST", path):
             return
+        if nullvault.handles("POST", path):
+            return nullvault.handle(self, "POST", path)  # NullVault devices; 404 unless NULLVAULT_ENABLED=1
         if path in ("/api/vault/deposit", "/api/vault/bot-read"):
             import vault_bot  # scoped bot access: add-only + per-read TOTP (2026-11-04)
             return vault_bot.handle(self, path)
