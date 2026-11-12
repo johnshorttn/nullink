@@ -500,3 +500,19 @@ class PinsExampleTests(NullVaultBase):
         att = {"app_id": {"packages": [[nullvault.PACKAGE, 1]], "signature_digests": rel["signing_cert_sha256"]}}
         self.assertEqual(nullvault.check_apk(apk, att)[0], None)
         self.assertEqual(rel["channel"], "test")
+
+    def test_example_pins_v2_and_v1_both_accepted(self):
+        ex = json.loads((Path(nullvault.__file__).parent / "deploy" / "nullvault" / "release_pins.example.json").read_text())
+        server._atomic_write_json(nullvault.pins_file(), ex)
+        for vc in (1, 2):
+            rel = ex["releases"][str(vc)]
+            apk = self.apk(version_code=vc, signing_cert_sha256=rel["signing_cert_sha256"],
+                           signing_lineage_sha256=rel["signing_cert_sha256"], base_apk_sha256=rel["apk_sha256"][0])
+            att = {"app_id": {"packages": [[nullvault.PACKAGE, vc]], "signature_digests": rel["signing_cert_sha256"]}}
+            self.assertEqual(nullvault.check_apk(apk, att)[0], None, vc)
+        self.assertEqual(ex["releases"]["2"]["version_name"], "0.2.0-test")
+        # the v1 APK hash is not accepted for v2 and vice versa
+        apk = self.apk(version_code=2, signing_cert_sha256=ex["releases"]["2"]["signing_cert_sha256"],
+                       signing_lineage_sha256=ex["releases"]["2"]["signing_cert_sha256"], base_apk_sha256=ex["releases"]["1"]["apk_sha256"][0])
+        att = {"app_id": {"packages": [[nullvault.PACKAGE, 2]], "signature_digests": ex["releases"]["2"]["signing_cert_sha256"]}}
+        self.assertIsNotNone(nullvault.check_apk(apk, att)[0])

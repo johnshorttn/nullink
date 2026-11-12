@@ -1,0 +1,6 @@
+{
+  "_comment": "Optional seed for Projects repo suggestions (data/nullvault/repo_catalog.json). Same shape as account-repo-catalog.json: only full_name, url, private are read; only https://github.com/ URLs are offered.",
+  "repos": [
+    {"full_name": "johnshorttn/nullink", "url": "https://github.com/johnshorttn/nullink", "private": true}
+  ]
+}

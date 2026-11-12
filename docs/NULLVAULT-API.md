@@ -180,3 +180,29 @@ At deploy time (John's decision 6) the file is made `chattr +a`; not done by the
 Slack DM to John via the existing `slack_call` path on `register`, `refused`, `flag` and `revoke`,
 including `reduced assurance` when it applies. Never includes tokens, codes or entry data. Sent only
 when `NULLVAULT_ENABLED=1` and `NULLVAULT_ALERTS` is not `0`.
+
+## v2 additions (2026-11-12): Links, Projects, Files
+
+All under `NULLVAULT_ENABLED=1`, plus sub-flags (default OFF): `NULLVAULT_LINKS=1`, `NULLVAULT_FILES=1`. A route whose flag is off answers 404.
+
+### Links and projects (`NULLVAULT_LINKS`)
+- Stored server-side in `data/nullvault/links.json` and `projects.json`. Not secret, but readable only through a signed device sync or an owner session (`GET /api/vault/links`, owner cookie: links, projects, suggestions).
+- `POST /api/vault/sync` response gains `links`, `projects`, `suggestions: {sites, repos}`. Absent = flag off (the app keeps its local copy).
+- Writes go through `POST /api/vault/device/write` (same challenge `purpose: "write"`, fresh attestation, fingerprint-signed) with `"kind": "link" | "project"`, `op: create | update | delete`, the record under `link` / `project`, optional `base_updated_at` (409 conflict on mismatch).
+  - link: `{id, name, url (http/https only), host_label}`
+  - project: `{id, name, repo_url (http/https), server, link_ids[], entry_ids[], notes}`. `entry_ids` are references to vault entries only; no secret value is ever copied into a project.
+  - Deleting a link removes it from every project's `link_ids`.
+- Discovery (read-only, cached 5 min), first that yields hosts wins: (a) Caddy admin `GET http://localhost:2019/config/`, (b) `/etc/caddy/Caddyfile` if readable, (c) admin seed `data/nullvault/discovered_sites.json` `{"hosts": [...]}`. Repo suggestions: `data/nullvault/repo_catalog.json` (`account-repo-catalog.json` shape). Suggestions are only offered, never added automatically.
+
+### Files (`NULLVAULT_FILES`)
+- `POST /api/vault/sync-challenge {"purpose":"files"}`, then `POST /api/vault/files/session` with the signed envelope (purpose `files`) -> `{files_session: "nvf_...", expires_in: 600}`. Held in server memory only; a revoked/flagged device's session stops working at once (403 + wipe).
+- With `Authorization: Bearer nvf_...`:
+  - `GET /api/vault/files` -> `{files: [...newest first, each with labels and latest], labels: [...]}` (no server paths).
+  - `GET /api/vault/files/<id>/download`, supports `Range: bytes=a-b` / `a-` / `-n` (206 + Content-Range, 416 when out of range).
+  - `POST /api/vault/files/uploads/<upload_id>/chunk?offset=N` (raw bytes, at most `max_chunk`), `GET /api/vault/files/uploads/<upload_id>` (resume point), `POST .../complete`.
+- Upload start and delete are signed device writes: `kind: "file"`, `op: "upload_begin"`, `file: {name, size, sha256, label}` -> `{upload_id, chunk_size, max_chunk}`; `op: "delete"`, `file: {id}` -> moves it to Nullink trash. The server checks the finished bytes against the signed SHA-256 (422 `sha256_mismatch`), applies the same size cap (413 `too_large`), free-space check, audit log and upload notify as browser uploads, and labels the file with the chosen label.
+- The browser Files API (`/api/fm/...`, `/api/files/...`) is unchanged and does not accept device or files-session tokens.
+- Files saved or shared on the phone are outside the encrypted vault DB.
+
+### Versions
+- Pins are per versionCode. A build whose versionCode has no pin is refused with 403 `apk_mismatch:version_not_pinned` but is NOT flagged or wiped (rollout ordering, not tampering). Keep the old versionCode pinned until every phone has updated.

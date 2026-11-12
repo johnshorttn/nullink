@@ -1,0 +1,4 @@
+{
+  "_comment": "Optional seed for the Links tab's 'discovered sites' (data/nullvault/discovered_sites.json). Used only when neither the Caddy admin API (GET http://localhost:2019/config/) nor a readable /etc/caddy/Caddyfile gives hostnames. Public hostnames only.",
+  "hosts": ["nullink.nullverse.cloud"]
+}
