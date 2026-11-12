@@ -52,6 +52,10 @@ def links_enabled() -> bool:
     return os.environ.get("NULLVAULT_LINKS", "0") == "1"
 
 
+def notes_enabled() -> bool:
+    return links_enabled() and os.environ.get("NULLVAULT_NOTES", "0") == "1"
+
+
 def files_enabled() -> bool:
     return os.environ.get("NULLVAULT_FILES", "0") == "1"
 
@@ -141,7 +145,40 @@ def project_from(e: dict, cur: dict | None = None) -> dict | None:
             "created_at": cur.get("created_at") or _now_iso(), "updated_at": _now_iso()}
 
 
-KINDS = {"link": ("links.json", link_from, MAX_LINKS), "project": ("projects.json", project_from, MAX_PROJECTS)}
+MAX_NOTES = 1000
+MAX_NOTE_BODY = 64 * 1024
+
+
+def _note_aad(nid: str) -> str:
+    return "nvnote_" + nid
+
+
+def note_from(e: dict, cur: dict | None = None) -> dict | None:
+    """Stored form: title and body encrypted at rest with the vault key (same AES-GCM as entry bodies)."""
+    cur = cur or {}
+    pid = str(e.get("project_id", cur.get("project_id")) or "")
+    if not any(p.get("id") == pid for p in _load_list("projects.json")):
+        return None
+    old = note_plain(cur) if cur else {}
+    title = _text(e.get("title", old.get("title")), 200)
+    body = e.get("body", old.get("body"))
+    body = body if isinstance(body, str) else ""
+    if len(body.encode("utf-8")) > MAX_NOTE_BODY or not (title or body):
+        return None
+    nid = cur.get("id") or _new_id()
+    enc = server.vault_encrypt(_note_aad(nid), json.dumps({"title": title, "body": body}))
+    return {"id": nid, "project_id": pid, "enc": enc,
+            "created_at": cur.get("created_at") or _now_iso(), "updated_at": _now_iso()}
+
+
+def note_plain(n: dict) -> dict:
+    d = json.loads(server.vault_decrypt(_note_aad(n["id"]), n["enc"]))
+    return {"id": n["id"], "project_id": n["project_id"], "title": d.get("title") or "", "body": d.get("body") or "",
+            "created_at": n.get("created_at"), "updated_at": n.get("updated_at")}
+
+
+KINDS = {"link": ("links.json", link_from, MAX_LINKS), "project": ("projects.json", project_from, MAX_PROJECTS),
+         "note": ("notes.json", note_from, MAX_NOTES)}
 
 
 def write_record(kind: str, op: str, e: dict, base: str | None):
@@ -161,10 +198,12 @@ def write_record(kind: str, op: str, e: dict, base: str | None):
             if not cur:
                 return 404, {"error": "not_found"}
             if base and base != cur.get("updated_at"):
-                return 409, {"error": "conflict", kind: cur}
+                return 409, {"error": "conflict", kind: note_plain(cur) if kind == "note" else cur}
             if op == "delete":
                 items = [x for x in items if x is not cur]
                 rec = cur
+                if kind == "project":  # a project's notes go with it
+                    _save_list("notes.json", [n for n in _load_list("notes.json") if n.get("project_id") != rec["id"]])
                 if kind == "link":  # drop dangling references from projects
                     projs = _load_list("projects.json")
                     for pr in projs:
@@ -179,6 +218,8 @@ def write_record(kind: str, op: str, e: dict, base: str | None):
         else:
             return 400, {"error": "bad_request"}
         _save_list(fname, items)
+    if kind == "note":
+        rec = note_plain(rec) if op != "delete" else {"id": rec["id"], "project_id": rec.get("project_id")}
     return 200, {kind: rec}
 
 
@@ -267,8 +308,11 @@ def repo_suggestions() -> list[dict]:
 def sync_extras() -> dict:
     if not links_enabled():
         return {}
-    return {"links": _load_list("links.json"), "projects": _load_list("projects.json"),
-            "suggestions": {"sites": discover()["sites"], "repos": repo_suggestions()}}
+    out = {"links": _load_list("links.json"), "projects": _load_list("projects.json"),
+           "suggestions": {"sites": discover()["sites"], "repos": repo_suggestions()}}
+    if notes_enabled():
+        out["notes"] = [note_plain(n) for n in _load_list("notes.json")]
+    return out
 
 
 # ---------------------------------------------------------------- Files: "Latest of similar files"
