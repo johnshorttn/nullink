@@ -109,10 +109,20 @@ def status_file() -> Path:
     return nv_dir() / "attestation_status.json"
 
 
+STAGE3_ROUTES = {
+    "/api/vault/chat/session": "nullvault_chat", "/api/vault/chat/rooms": "nullvault_chat",
+    "/api/vault/chat/messages": "nullvault_chat", "/api/vault/chat/send": "nullvault_chat",
+    "/api/vault/approvals": "nullvault_approvals", "/api/vault/approvals/decide": "nullvault_approvals",
+    "/api/vault/actions": "nullvault_actions", "/api/vault/actions/run": "nullvault_actions",
+}
+
+
 def handles(method: str, path: str) -> bool:
     if path.startswith("/api/vault/files") and FILES_RE.match(path):
         return method in ("GET", "POST")
     if path in ("/api/vault/status", "/api/vault/status/token"):
+        return method in ("GET", "POST")
+    if path in STAGE3_ROUTES:
         return method in ("GET", "POST")
     if method == "POST":
         return path in ROUTES_POST or bool(REVOKE_RE.match(path))
@@ -661,6 +671,16 @@ def handle(h, method: str, path: str) -> None:
             return st.route(h, method, path)
         except LeaseKeyUnavailable:
             return h._json(503, {"error": "lease_key_unavailable"})
+    if path in STAGE3_ROUTES:
+        import importlib
+        mod = importlib.import_module(STAGE3_ROUTES[path])
+        mod.bind(sys.modules[__name__], server)
+        if int(h.headers.get("Content-Length") or 0) > MAX_BODY:
+            return h._json(413, {"error": "too_large"})
+        try:
+            return mod.route(h, method, path)
+        except LeaseKeyUnavailable:
+            return h._json(503, {"error": "lease_key_unavailable"})
     if path == "/api/vault/links":
         if not ext.links_enabled():
             return h._json(404, {"error": "not_found"})
@@ -873,7 +893,7 @@ def _sync_challenge(h):
     if not d:
         return
     purpose = str((h._read_json() or {}).get("purpose") or "sync")
-    if purpose not in ("sync", "write", "files", "status"):
+    if purpose not in ("sync", "write", "files", "status", "chat", "approve", "action"):
         return h._json(400, {"error": "bad_request"})
     n = nonce_issue(purpose, d["device_id"], SYNC_TTL)
     return h._json(200, {"nonce": n, "expires_in": SYNC_TTL, "purpose": purpose})

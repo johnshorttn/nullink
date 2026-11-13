@@ -221,3 +221,23 @@ Flags (default OFF, under `NULLVAULT_ENABLED=1`): `NULLVAULT_STATUS=1`, `NULLVAU
 - Signed write `kind: "note"`, `op: create|update|delete`, `note: {id, project_id, title, body}`, optional `base_updated_at` (409 + current note). Project must exist (404 `project_not_found`). Caps: 1000 notes, 64 KB body.
 - `data/nullvault/notes.json` holds `{id, project_id, enc, created_at, updated_at}`; `enc` is the vault-key AES-256-GCM ciphertext of `{title, body}` (AAD bound to the note id). A tampered record answers 500 `vault_integrity`.
 - Sync response gains `notes: [...]` (decrypted, to the attested device only). Deleting a project deletes its notes.
+
+## v4 additions (2026-11-12): Chat, Approvals, Quick actions
+
+Flags (default OFF, under `NULLVAULT_ENABLED=1`): `NULLVAULT_CHAT=1`, `NULLVAULT_APPROVALS=1`, `NULLVAULT_ACTIONS=1` (+ `NULLVAULT_ACTIONS_ALLOW`). New sync-challenge purposes: `chat`, `approve`, `action`.
+
+### Chat (`NULLVAULT_CHAT`)
+- `POST /api/vault/chat/session` (signed envelope, purpose `chat`) -> `{chat_session: "nvc_…", expires_in: 600}` (memory only; revoke/flag ends it: 403 + wipe; expired: 401 `chat_session_expired`).
+- With `Bearer nvc_…`: `GET /api/vault/chat/rooms` -> `{rooms: [{id, title, kind, category, bridge}]}`; `GET /api/vault/chat/messages?session=<room>&after=<id>&limit=<1-100>[&tail=1]` -> `{messages: [{id, role, text, ts}], next_after, has_more}`; `POST /api/vault/chat/send {session_id, text}` -> `{ok, message}` (400 empty/too_long, 404 room_not_found, 429 rate_limited at 30 per 10 min).
+- Sends use `server.append_message("user", …)` plus the same `write_pending("notify")` / `fire_webhook` as a web-UI send (none for bridge rooms). Polling only.
+
+### Approvals (`NULLVAULT_APPROVALS`)
+- `GET /api/vault/approvals` (Bearer `nvd_`) -> `{github: {available, reason?, items[], token_login?}, nullaxis: {available: false, reason: "on_hold", items: []}, recent[], log_ok}`. GitHub list: search `is:pr is:open archived:false user:<owner>` (30 max, 2 min cache), each PR re-read for its head SHA; `own_pr` when the author is the token's account.
+- `POST /api/vault/approvals/decide` (signed, purpose `approve`): `approval: {source: "github", repo: "owner/name", number, head_sha (40 hex), decision: "approve"|"reject", note?}`. Errors: 400 bad_request, 409 `github_unavailable` / `pr_not_open` / `stale_head` (+ current `head_sha`), 429. Success: `{ok, decision, recorded_at, review}`, review = `submitted` | `own_pr` | `not_permitted` | `refused` | `error` | `disabled` | `not_requested`.
+- Log `data/nullvault/approvals.jsonl`: one JSON object per line, `prev` = SHA-256 of the previous line, `payload_b64` + `signature` (the device's ECDSA signature, verifiable with the device's registered key). Events `decision`, `github_review`. Opened only with `O_APPEND`.
+- No merge call exists.
+
+### Quick actions (`NULLVAULT_ACTIONS`)
+- `GET /api/vault/actions` (Bearer `nvd_`) -> `{enabled, actions: [{name, label, args, privilege}]}` (only allowlisted names).
+- `POST /api/vault/actions/run` (signed, purpose `action`): `action: {name, args?}` -> `{ok, action, rc, result: ok|failed|needs_privilege, output (last 4000 chars)}`. 403 `action_not_allowed`, 400 `bad_args` (undeclared keys, wrong type, out of range), 429 `rate_limited` (per device 10/h, per action as in CATALOG).
+- Log `data/nullvault/actions.jsonl` (hash-chained): `run` (name, validated args, device), then `result` (rc, result, seconds, `output_sha256`; output itself not logged), or `refused`.
