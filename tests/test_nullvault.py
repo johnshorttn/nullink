@@ -426,6 +426,24 @@ class ApkTamperPatchTests(NullVaultBase):
         st, _, js, _ = self.sync_challenge(dev)
         self.assertEqual((st, js["error"]), (403, "flagged"))
 
+    def test_inplace_update_sync_returns_manifest_for_new_version(self):
+        """The app keys its local APK-hash pin on the manifest's version_code. A phone registered on vc1 that
+        updates in place to a pinned vc2 must sync fine and get back the vc2 manifest (this re-arms the strict
+        local check); an unpinned hash for vc2 is still refused with wipe."""
+        apk2 = "bb" * 32
+        pins = json.loads(nullvault.pins_file().read_text())
+        pins["releases"]["2"] = {"version_name": "0.2.0-test", "channel": "test", "signing_cert_sha256": [CERT],
+                                 "apk_sha256": [apk2], "revoked": False}
+        server._atomic_write_json(nullvault.pins_file(), pins)
+        dev = self.register()
+        self.assertEqual(json.loads(base64.b64decode(dev["js"]["pins"]["payload"]))["version_code"], 1)
+        st, js, _, _ = self.sync(dev, apk=self.apk(version_code=2, base_apk_sha256=apk2), kd_kw={"version": 2})
+        self.assertEqual(st, 200, js)
+        m = json.loads(base64.b64decode(js["pins"]["payload"]))
+        self.assertEqual((m["version_code"], m["apk_sha256"]), (2, [apk2]))
+        st, js, _, _ = self.sync(dev, apk=self.apk(version_code=2, base_apk_sha256="ee" * 32), kd_kw={"version": 2})
+        self.assertEqual((st, js["error"], js["wipe"]), (403, "apk_mismatch:apk_hash_mismatch", True))
+
     def test_newer_patch_accepted_older_refused(self):
         dev = self.register(kd_kw={"patch": 202609})
         st, js, _, _ = self.sync(dev, kd_kw={"patch": 202610})
@@ -504,7 +522,7 @@ class PinsExampleTests(NullVaultBase):
     def test_example_pins_v2_and_v1_both_accepted(self):
         ex = json.loads((Path(nullvault.__file__).parent / "deploy" / "nullvault" / "release_pins.example.json").read_text())
         server._atomic_write_json(nullvault.pins_file(), ex)
-        for vc in (1, 2, 3, 4):
+        for vc in (1, 2, 3, 4, 5):
             rel = ex["releases"][str(vc)]
             apk = self.apk(version_code=vc, signing_cert_sha256=rel["signing_cert_sha256"],
                            signing_lineage_sha256=rel["signing_cert_sha256"], base_apk_sha256=rel["apk_sha256"][0])
@@ -513,6 +531,7 @@ class PinsExampleTests(NullVaultBase):
         self.assertEqual(ex["releases"]["2"]["version_name"], "0.2.0-test")
         self.assertEqual(ex["releases"]["3"]["version_name"], "0.3.0-test")
         self.assertEqual(ex["releases"]["4"]["version_name"], "0.4.0-test")
+        self.assertEqual(ex["releases"]["5"]["version_name"], "0.4.1-test")
         # the v1 APK hash is not accepted for v2 and vice versa
         apk = self.apk(version_code=2, signing_cert_sha256=ex["releases"]["2"]["signing_cert_sha256"],
                        signing_lineage_sha256=ex["releases"]["2"]["signing_cert_sha256"], base_apk_sha256=ex["releases"]["1"]["apk_sha256"][0])
