@@ -575,6 +575,26 @@ def upload_status(h, d, uid):
         h._json(e.code, {"error": e.err})
 
 
+def upload_cancel(h, d, uid):
+    """The phone cancelled: drop the partial upload (part file + metadata) now instead of waiting for STALE_SECS.
+    Same files session and own-device check as the chunk route; idempotent for this device's own upload."""
+    import fm_uploads as up
+    fm = _fm()
+    lk = up._lock(uid)
+    if not lk.acquire(timeout=5):
+        return h._json(409, {"error": "busy"})
+    try:
+        try:
+            _own_upload(d, uid)
+        except fm._Err as e:
+            return h._json(e.code, {"error": e.err})
+        up._remove(uid)
+    finally:
+        lk.release()
+    server.vault_audit("device_upload_cancel", device=d["device_id"], upload=uid)
+    return h._json(200, {"ok": True, "upload_id": uid, "cancelled": True})
+
+
 def upload_complete(h, d, uid):
     """Checks the bytes against the SHA-256 in the signed intent, then registers like a browser upload
     (same file_dates stamping, files.json entry, pending + webhook notify), but with the chosen label."""

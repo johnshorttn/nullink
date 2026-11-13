@@ -445,24 +445,31 @@ class ApkTamperPatchTests(NullVaultBase):
         self.assertEqual((st, js["error"], js["wipe"]), (403, "apk_mismatch:apk_hash_mismatch", True))
 
     def test_v5_to_v6_inplace_update_confirmed_at_sync(self):
-        """0.4.2 upgrade: with the real example pins (v1-v6), a phone registered on v5 that installs v6 in place syncs
+        """0.4.2 upgrade: with the real example pins, a phone registered on v5 that installs v6 in place syncs
         200 and gets the v6 manifest; an unpinned v6 hash is refused with wipe; v5 keeps working (old pins kept)."""
+        self._inplace_update(5, 6)
+
+    def test_v6_to_v7_inplace_update_confirmed_at_sync(self):
+        """0.4.3 upgrade (download actions + progress): same pattern for v6 -> v7."""
+        self._inplace_update(6, 7)
+
+    def _inplace_update(self, old, new):
         ex = json.loads((Path(nullvault.__file__).parent / "deploy" / "nullvault" / "release_pins.example.json").read_text())
         server._atomic_write_json(nullvault.pins_file(), ex)
-        r5, r6 = ex["releases"]["5"], ex["releases"]["6"]
-        certs = r5["signing_cert_sha256"]
+        ro, rn = ex["releases"][str(old)], ex["releases"][str(new)]
+        certs = ro["signing_cert_sha256"]
         def apk(vc, h):
             return self.apk(version_code=vc, signing_cert_sha256=certs, signing_lineage_sha256=certs, base_apk_sha256=h)
-        dev = self.register(apk=apk(5, r5["apk_sha256"][0]), kd_kw={"version": 5, "digests": tuple(certs)})
-        self.assertEqual(json.loads(base64.b64decode(dev["js"]["pins"]["payload"]))["version_code"], 5)
-        st, js, _, _ = self.sync(dev, apk=apk(6, r6["apk_sha256"][0]), kd_kw={"version": 6, "digests": tuple(certs)})
+        dev = self.register(apk=apk(old, ro["apk_sha256"][0]), kd_kw={"version": old, "digests": tuple(certs)})
+        self.assertEqual(json.loads(base64.b64decode(dev["js"]["pins"]["payload"]))["version_code"], old)
+        st, js, _, _ = self.sync(dev, apk=apk(new, rn["apk_sha256"][0]), kd_kw={"version": new, "digests": tuple(certs)})
         self.assertEqual(st, 200, js)
         m = json.loads(base64.b64decode(js["pins"]["payload"]))
-        self.assertEqual((m["version_code"], m["apk_sha256"]), (6, r6["apk_sha256"]))
-        other = self.register(apk=apk(5, r5["apk_sha256"][0]), kd_kw={"version": 5, "digests": tuple(certs)})
-        st, js, _, _ = self.sync(other, apk=apk(5, r5["apk_sha256"][0]), kd_kw={"version": 5, "digests": tuple(certs)})
+        self.assertEqual((m["version_code"], m["apk_sha256"]), (new, rn["apk_sha256"]))
+        other = self.register(apk=apk(old, ro["apk_sha256"][0]), kd_kw={"version": old, "digests": tuple(certs)})
+        st, js, _, _ = self.sync(other, apk=apk(old, ro["apk_sha256"][0]), kd_kw={"version": old, "digests": tuple(certs)})
         self.assertEqual(st, 200, js)
-        st, js, _, _ = self.sync(other, apk=apk(6, "ee" * 32), kd_kw={"version": 6, "digests": tuple(certs)})
+        st, js, _, _ = self.sync(other, apk=apk(new, "ee" * 32), kd_kw={"version": new, "digests": tuple(certs)})
         self.assertEqual((st, js["error"], js["wipe"]), (403, "apk_mismatch:apk_hash_mismatch", True))
 
     def test_newer_patch_accepted_older_refused(self):
@@ -543,7 +550,7 @@ class PinsExampleTests(NullVaultBase):
     def test_example_pins_v2_and_v1_both_accepted(self):
         ex = json.loads((Path(nullvault.__file__).parent / "deploy" / "nullvault" / "release_pins.example.json").read_text())
         server._atomic_write_json(nullvault.pins_file(), ex)
-        for vc in (1, 2, 3, 4, 5, 6):
+        for vc in (1, 2, 3, 4, 5, 6, 7):
             rel = ex["releases"][str(vc)]
             apk = self.apk(version_code=vc, signing_cert_sha256=rel["signing_cert_sha256"],
                            signing_lineage_sha256=rel["signing_cert_sha256"], base_apk_sha256=rel["apk_sha256"][0])
@@ -554,6 +561,7 @@ class PinsExampleTests(NullVaultBase):
         self.assertEqual(ex["releases"]["4"]["version_name"], "0.4.0-test")
         self.assertEqual(ex["releases"]["5"]["version_name"], "0.4.1-test")
         self.assertEqual(ex["releases"]["6"]["version_name"], "0.4.2-test")
+        self.assertEqual(ex["releases"]["7"]["version_name"], "0.4.3-test")
         # the v1 APK hash is not accepted for v2 and vice versa
         apk = self.apk(version_code=2, signing_cert_sha256=ex["releases"]["2"]["signing_cert_sha256"],
                        signing_lineage_sha256=ex["releases"]["2"]["signing_cert_sha256"], base_apk_sha256=ex["releases"]["1"]["apk_sha256"][0])

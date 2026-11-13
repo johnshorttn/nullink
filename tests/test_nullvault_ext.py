@@ -290,6 +290,36 @@ class FilesTests(ExtBase):
         self.assertEqual((st, js["error"]), (422, "sha256_mismatch"))
         self.assertFalse(any(f.get("name") == "photo.jpg" for f in server.load_files()))
 
+    def test_upload_cancel_removes_partial(self):
+        data = os.urandom(150_000)
+        st, js = self.upload(data)
+        uid = js["upload_id"]
+        h = self.files_session()
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=10)
+        conn.request("POST", f"/api/vault/files/uploads/{uid}/chunk?offset=0", body=data[:100_000],
+                     headers={**h, "Host": "nullink.216.158.238.236.sslip.io", "X-Forwarded-Proto": "https"})
+        r = conn.getresponse(); r.read(); conn.close()
+        self.assertEqual(r.status, 200)
+        self.assertTrue(fm_uploads._part_path(uid).exists())
+        # another device cannot cancel it
+        other = self.register()
+        st, _, js, _ = self.req(f"/api/vault/files/uploads/{uid}/cancel", "POST", {}, headers=self.files_session(other))
+        self.assertEqual(st, 404)
+        self.assertTrue(fm_uploads._part_path(uid).exists())
+        st, _, js, _ = self.req(f"/api/vault/files/uploads/{uid}/cancel", "POST", {}, headers=h)
+        self.assertEqual((st, js.get("cancelled")), (200, True), js)
+        self.assertFalse(fm_uploads._part_path(uid).exists())
+        self.assertFalse(fm_uploads._meta_path(uid).exists())
+        st, *_ = self.req(f"/api/vault/files/uploads/{uid}", headers=h)
+        self.assertEqual(st, 404)
+        st, *_ = self.req(f"/api/vault/files/uploads/{uid}/complete", "POST", {}, headers=h)
+        self.assertEqual(st, 404)
+        self.assertIn("device_upload_cancel", server.VAULT_AUDIT_FILE.read_text())
+        # no session -> 401
+        st, *_ = self.req(f"/api/vault/files/uploads/{uid}/cancel", "POST", {})
+        self.assertEqual(st, 401)
+
     def test_upload_belongs_to_device(self):
         st, js = self.upload(b"abc")
         uid = js["upload_id"]

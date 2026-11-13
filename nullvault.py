@@ -60,7 +60,7 @@ ROUTES_POST = {
     "/api/vault/sync-challenge", "/api/vault/sync", "/api/vault/device/write",
 }
 REVOKE_RE = re.compile(r"^/api/vault/devices/(dev_[0-9a-f]{16})/revoke$")
-FILES_RE = re.compile(r"^/api/vault/files(?:/session|/([A-Za-z0-9_-]{1,64})/download|/uploads/([a-f0-9]{24})(/chunk|/complete)?)?$")
+FILES_RE = re.compile(r"^/api/vault/files(?:/session|/([A-Za-z0-9_-]{1,64})/download|/uploads/([a-f0-9]{24})(/chunk|/complete|/cancel)?)?$")
 
 _lock = threading.RLock()
 _nonces: dict[str, dict] = {}
@@ -1088,6 +1088,8 @@ def _files_route(h, method, path, ext):
         return ext.upload_chunk(h, d, uid, qs)
     if uid and sub == "/complete" and method == "POST":
         return ext.upload_complete(h, d, uid)
+    if uid and sub == "/cancel" and method == "POST":
+        return ext.upload_cancel(h, d, uid)
     return h._json(404, {"error": "not_found"})
 
 
