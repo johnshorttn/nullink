@@ -78,6 +78,17 @@
         "ee779def3ad33602bad62b78b49c163ab48dc863cd3eede6b0eb4d26d89bf639"
       ],
       "revoked": false
+    },
+    "8": {
+      "version_name": "0.4.4-test",
+      "channel": "test",
+      "signing_cert_sha256": [
+        "69a9ba1dc648af702dc3fdc33e1a836fa7231ac3ec983cd82fc9c4e535fc6dcf"
+      ],
+      "apk_sha256": [
+        "0786b25c263295fe7ea77b633c425e4bb38ad86c4df088e3c4ce49a4c29b992f"
+      ],
+      "revoked": false
     }
   }
 }
