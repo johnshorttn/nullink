@@ -31,6 +31,12 @@ versionCode, wrong signing cert or APK hash (reported or attested), `debuggable`
 | `NULLVAULT_STATUS_SERVICES` | built-in list | comma list of systemd units to show (or `data/nullvault/status_services.json`) |
 | `NULLVAULT_STATUS_MONITOR` | `1` | `0` turns off the 60 s Slack down-alert monitor (status card still works) |
 | `NULLVAULT_NOTES` | `0` | `1` adds encrypted project notes (needs `NULLVAULT_LINKS=1`) |
+| `NULLVAULT_CHAT` | `0` | `1` adds Nullink rooms on the phone (10-min fingerprint chat session, polling) |
+| `NULLVAULT_APPROVALS` | `0` | `1` adds the approvals queue (GitHub PRs via `secrets/github_token.txt`; NullAxis placeholder) |
+| `NULLVAULT_APPROVALS_GITHUB_REVIEW` | `1` | `0` records decisions only, never submits a GitHub APPROVE review |
+| `NULLVAULT_APPROVALS_GITHUB_OWNER` | `johnshorttn` | account whose open PRs are listed |
+| `NULLVAULT_ACTIONS` | `0` | `1` turns on quick actions (still nothing runs until the allowlist names an action) |
+| `NULLVAULT_ACTIONS_ALLOW` | empty | comma list of `nullvault_actions.CATALOG` names; set only with John's OK |
 | `NULLVAULT_SERVER_LABEL` | hostname | default server label for new links and discovered sites |
 | `NULLVAULT_DISCOVERY_CADDY` | `1` | `0` skips the Caddy admin API probe (then Caddyfile, then seed file) |
 | `NULLVAULT_DEVICE_CAP` | `2` | active (non-revoked) devices |
@@ -85,6 +91,47 @@ Down alerts are **not true push**: no Firebase/FCM. The server sends a Slack DM 
 down/up transition (watched unit not active, or disk >= 95%), at most one per unit and direction per 30 min, no alert
 for the state found at start-up. The phone can opt in to a WorkManager check every 15 min (Android minimum, Doze may
 delay it) that raises a local notification.
+
+## Stage 3 deploy (Chat, Approvals, Quick-actions framework; app 0.4.0-test, versionCode 4)
+1. Fast-forward `/opt/nullink`; restart Nullink. New flags off -> `/api/vault/chat/*`, `/api/vault/approvals*`, `/api/vault/actions*` 404.
+2. Pins (as nullink), **keep v1-v3**: `python3 nullvault.py pin-add --version-code 4 --version-name 0.4.0-test --channel test --cert-sha256 69a9ba1d…6dcf --apk-sha256 4719348d…c6f6`.
+3. Add `NULLVAULT_CHAT=1` and `NULLVAULT_APPROVALS=1` to the drop-in; daemon-reload; restart Nullink. Do **not** add `NULLVAULT_ACTIONS` or an allowlist without John's OK.
+4. New append-only logs (created on first use): `data/nullvault/approvals.jsonl`, `data/nullvault/actions.jsonl`. Optional (root): `chattr +a` on them after they exist.
+5. Rollback: drop the two flags (routes 404) or revert the merge. The logs can stay.
+
+Chat: the existing `/api/messages` API only takes an owner cookie or `nl_` token, so device access is a separate,
+flag-gated route over the same message store with the same send side effects. One fingerprint + device signature
+opens a 10-minute `nvc_` session (memory only); the app asks for a tap-to-confirm on every send; polling only.
+
+Approvals: GitHub access is whatever `secrets/github_token.txt` already allows (checked read-only 2026-11-12: it
+exists, nullink can read it, it is a fine-grained token for johnshorttn). No token -> "unavailable", none listed.
+A decision is fingerprint + device signed, bound to repo/number/head SHA, and appended with its signature to
+`approvals.jsonl`. `approve` then submits a GitHub `APPROVE` review only if the token allows it; GitHub refuses
+reviews on your own PRs, so those are recorded but not reviewed (`own_pr`). Nothing ever merges.
+NullAxis: placeholder only (work on hold; no local endpoint exists on this server; nothing is contacted).
+
+### Quick actions: proposed allowlist (needs John's OK; shipped empty, flag off)
+Permission check (read-only, 2026-11-12): `sudo -l` as nullink allows `NOPASSWD: /usr/local/sbin/nulldo` (from a
+login shell). But `nullink.service` runs with `NoNewPrivileges=yes` and an empty `CapabilityBoundingSet`, and sudo
+refuses under no-new-privileges (verified with `setpriv --no-new-privs sudo -n -l` as nullink: "The 'no new
+privileges' flag is set, which prevents sudo from running as root"). So nothing that goes through sudo can run
+from inside the Nullink process today.
+
+| Action (CATALOG name) | argv | Works with current permissions? |
+| --- | --- | --- |
+| `nullink-health` | `curl -sS -m 5 http://127.0.0.1:8766/health` | **Yes** (no privilege; same data as public `/health`) |
+| `nullink-status` | `systemctl show nullink.service --property=…` | **Yes** (unprivileged `systemctl show`; same as the Status card) |
+| `nulldo-status` | `sudo -n /usr/local/sbin/nulldo status` | **No**: sudoers allows it, but NoNewPrivileges blocks sudo from the service |
+| `nulldo-health` | `sudo -n /usr/local/sbin/nulldo health` | **No** (same); `nullink-health` gives the same answer without sudo |
+| `nulldo-journal` (lines 1-200) | `sudo -n /usr/local/sbin/nulldo journal N` | **No** (same). Without nulldo, nullink cannot read its unit's journal either (not in adm/systemd-journal) |
+| `nulldo-restart` | `sudo -n /usr/local/sbin/nulldo restart` | **No** (same). Also note: it restarts the process serving the request, so the phone gets no answer; check health after |
+| token renewal (chatgpt-mcp / mcpgw-upstream-readonly) | — | **Left out**: no renewal script exists on the server (only `mcpgw-approvals` / `mcpgw-tenants`, which require root) |
+
+Ways to make the nulldo rows work (each is a permission change, so John's OK first; none done):
+(a) drop `NoNewPrivileges=yes` from nullink.service (weakens the whole service's sandbox; not recommended), or
+(b) a small root-owned helper unit (e.g. socket-activated `nulldo` bridge on a unix socket only nullink can open)
+that accepts the same fixed action names, or (c) a systemd path/timer unit that runs one fixed nulldo action.
+Recommended first allowlist if John agrees: `NULLVAULT_ACTIONS=1`, `NULLVAULT_ACTIONS_ALLOW=nullink-health,nullink-status`.
 
 ## Rollback
 - Fast: remove `NULLVAULT_ENABLED=1` (or set `0`) and restart. All routes 404 again; devices wipe at their lease end.

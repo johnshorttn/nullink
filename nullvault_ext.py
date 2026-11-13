@@ -645,3 +645,132 @@ def file_trash(fid: str) -> bool:
         if hit:
             server.save_files(files)
     return hit
+
+
+# ---------------------------------------------------------------- Stage 3: shared helpers
+
+_chain_lock = threading.Lock()
+
+
+def chained_append(name: str, rec: dict) -> dict:
+    """Append-only, hash-chained JSONL log in data/nullvault/<name>. Opened only with O_APPEND, so it is
+    compatible with `chattr +a`. Each record carries prev = SHA-256 of the previous line."""
+    path = nv.nv_dir() / name
+    with _chain_lock:
+        prev = "0" * 64
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 65536))
+                tail = f.read().splitlines()
+                if tail:
+                    prev = hashlib.sha256(tail[-1]).hexdigest()
+        except FileNotFoundError:
+            pass
+        out = {"ts": _now_iso(), **rec, "prev": prev}
+        line = (json.dumps(out, sort_keys=True, ensure_ascii=True) + "\n").encode()
+        fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+    return out
+
+
+def chain_verify(name: str) -> tuple[bool, int]:
+    """(ok, records): every record's prev matches the hash of the line before it."""
+    path = nv.nv_dir() / name
+    try:
+        lines = path.read_bytes().splitlines()
+    except FileNotFoundError:
+        return True, 0
+    prev = "0" * 64
+    for ln in lines:
+        try:
+            if json.loads(ln).get("prev") != prev:
+                return False, len(lines)
+        except ValueError:
+            return False, len(lines)
+        prev = hashlib.sha256(ln).hexdigest()
+    return True, len(lines)
+
+
+def chain_tail(name: str, n: int = 50) -> list[dict]:
+    try:
+        lines = (nv.nv_dir() / name).read_bytes().splitlines()[-n:]
+    except FileNotFoundError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            out.append(json.loads(ln))
+        except ValueError:
+            continue
+    return out
+
+
+class SessionStore:
+    """Short-lived bearer sessions in server memory only (like the Files session)."""
+
+    def __init__(self, prefix: str, ttl: int):
+        self.prefix, self.ttl, self._s, self._l = prefix, ttl, {}, threading.Lock()
+
+    def issue(self, device_id: str) -> tuple[str, int]:
+        tok = self.prefix + nv.b64url(secrets.token_bytes(32))
+        now = time.time()
+        with self._l:
+            for k in [k for k, v in self._s.items() if v["exp"] < now]:
+                self._s.pop(k, None)
+            self._s[hashlib.sha256(tok.encode()).hexdigest()] = {"device_id": device_id, "exp": now + self.ttl}
+        return tok, self.ttl
+
+    def device(self, h, expired_error: str):
+        """Bearer session -> active device, or None (response sent). Revoke/flag ends it at once."""
+        tok = h._bearer_token() or ""
+        rec = None
+        if tok.startswith(self.prefix):
+            with self._l:
+                rec = self._s.get(hashlib.sha256(tok.encode()).hexdigest())
+        if not rec or rec["exp"] < time.time():
+            h._json(401, {"error": expired_error})
+            return None
+        d = nv.devices().get(rec["device_id"])
+        if not d or d["status"] != "active":
+            h._json(403, {"error": (d or {}).get("status") or "unauthorized", "wipe": True})
+            return None
+        return d
+
+    def clear(self):
+        with self._l:
+            self._s.clear()
+
+
+class RateLimit:
+    """Sliding-window limiter: at most n events per window seconds per key."""
+
+    def __init__(self):
+        self._ev: dict[str, list[float]] = {}
+        self._l = threading.Lock()
+
+    def hit(self, key: str, n: int, window: float, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        with self._l:
+            ev = [t for t in self._ev.get(key, []) if now - t < window]
+            if len(ev) >= n:
+                self._ev[key] = ev
+                return False
+            ev.append(now)
+            self._ev[key] = ev
+            return True
+
+    def clear(self):
+        with self._l:
+            self._ev.clear()
+
+
+def capture_body(h) -> dict:
+    """Reads the JSON body once and makes later h._read_json() calls return the same dict."""
+    body = h._read_json() or {}
+    h._read_json = lambda: body
+    return body
