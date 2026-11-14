@@ -241,3 +241,16 @@ Flags (default OFF, under `NULLVAULT_ENABLED=1`): `NULLVAULT_CHAT=1`, `NULLVAULT
 - `GET /api/vault/actions` (Bearer `nvd_`) -> `{enabled, actions: [{name, label, args, privilege}]}` (only allowlisted names).
 - `POST /api/vault/actions/run` (signed, purpose `action`): `action: {name, args?}` -> `{ok, action, rc, result: ok|failed|needs_privilege, output (last 4000 chars)}`. 403 `action_not_allowed`, 400 `bad_args` (undeclared keys, wrong type, out of range), 429 `rate_limited` (per device 10/h, per action as in CATALOG).
 - Log `data/nullvault/actions.jsonl` (hash-chained): `run` (name, validated args, device), then `result` (rc, result, seconds, `output_sha256`; output itself not logged), or `refused`.
+
+## 0.5.0: window signing key (K_sess), additive
+- A K_dev-signed payload for `sync`, `write`, `files` or `chat` may carry `"session": {"chain": [b64 DER...], "ttl": seconds}`.
+  `chain` is the attestation chain of a fresh hardware EC P-256 key whose attestation challenge is the request's nonce.
+  It is registered (memory only, `ttl` clamped to 60 s..30 days) only after the request passed every normal check, and only if
+  the key is from the same verified boot key / security level / app id and its hardware auth list says fingerprint auth
+  with AUTH_TIMEOUT 1..3600 s (no NO_AUTH_REQUIRED). Problems are audited (`device_session_refused`) and the request itself stands.
+- Later `write`, `files` and `chat` payloads may set `"signed_by": "session"` and be signed by that key. Everything else
+  (nonce, timestamp, fresh attestation, APK and state reports, tamper and pin checks) is unchanged.
+  Errors: 403 `session_not_allowed` (other purposes), 401 `session_expired` (none registered), 403 `session_invalid`
+  (bad signature; the delegation is dropped). Revoke, any refusal or flag of the device, and a bad K_dev signature drop it too.
+- Absent `signed_by` = `"device"` (K_dev), exactly as before. Old clients are unaffected.
+- Archive (0.5.0 app): vault entries are archived with the reserved tag `nullvault:archived` in the existing `tags` field. No server change.

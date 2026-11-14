@@ -79,9 +79,15 @@ def app_id(package: str, version: int, digests_hex) -> bytes:
 
 def key_description(challenge: bytes, *, sec=1, km_sec=None, boot_state=0, locked=True,
                     boot_key=b"\x11" * 32, patch=202610, package="cloud.nullverse.nullvault",
-                    version=1, digests=("aa" * 32,), origin=0, model=None, manufacturer=None) -> bytes:
-    hw = [CTX(1, SET(INT(2))), CTX(2, INT(3)), CTX(3, INT(256)), CTX(10, INT(1)),
-          CTX(504, INT(2)), CTX(702, INT(origin)),
+                    version=1, digests=("aa" * 32,), origin=0, model=None, manufacturer=None,
+                    auth_timeout=None, no_auth=False) -> bytes:
+    hw = [CTX(1, SET(INT(2))), CTX(2, INT(3)), CTX(3, INT(256)), CTX(10, INT(1))]
+    if no_auth:
+        hw.append(CTX(503, NULL()))
+    hw += [CTX(504, INT(2))]
+    if auth_timeout is not None:
+        hw.append(CTX(505, INT(auth_timeout)))
+    hw += [CTX(702, INT(origin)),
           CTX(704, SEQ(OCT(boot_key), BOOL(locked), ENUM(boot_state), OCT(b"\x22" * 32))),
           CTX(705, INT(150000)), CTX(706, INT(patch))]
     if manufacturer:

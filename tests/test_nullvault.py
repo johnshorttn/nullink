@@ -457,6 +457,10 @@ class ApkTamperPatchTests(NullVaultBase):
         """0.4.4 upgrade (QR helper + Google Authenticator import): same pattern for v7 -> v8."""
         self._inplace_update(7, 8)
 
+    def test_v8_to_v9_inplace_update_confirmed_at_sync(self):
+        """0.5.0 upgrade (auth window + window key, bottom nav, Files tags, archive): same pattern for v8 -> v9."""
+        self._inplace_update(8, 9)
+
     def _inplace_update(self, old, new):
         ex = json.loads((Path(nullvault.__file__).parent / "deploy" / "nullvault" / "release_pins.example.json").read_text())
         server._atomic_write_json(nullvault.pins_file(), ex)
@@ -554,7 +558,7 @@ class PinsExampleTests(NullVaultBase):
     def test_example_pins_v2_and_v1_both_accepted(self):
         ex = json.loads((Path(nullvault.__file__).parent / "deploy" / "nullvault" / "release_pins.example.json").read_text())
         server._atomic_write_json(nullvault.pins_file(), ex)
-        for vc in (1, 2, 3, 4, 5, 6, 7, 8):
+        for vc in (1, 2, 3, 4, 5, 6, 7, 8, 9):
             rel = ex["releases"][str(vc)]
             apk = self.apk(version_code=vc, signing_cert_sha256=rel["signing_cert_sha256"],
                            signing_lineage_sha256=rel["signing_cert_sha256"], base_apk_sha256=rel["apk_sha256"][0])
@@ -567,6 +571,7 @@ class PinsExampleTests(NullVaultBase):
         self.assertEqual(ex["releases"]["6"]["version_name"], "0.4.2-test")
         self.assertEqual(ex["releases"]["7"]["version_name"], "0.4.3-test")
         self.assertEqual(ex["releases"]["8"]["version_name"], "0.4.4-test")
+        self.assertEqual(ex["releases"]["9"]["version_name"], "0.5.0-test")
         # the v1 APK hash is not accepted for v2 and vice versa
         apk = self.apk(version_code=2, signing_cert_sha256=ex["releases"]["2"]["signing_cert_sha256"],
                        signing_lineage_sha256=ex["releases"]["2"]["signing_cert_sha256"], base_apk_sha256=ex["releases"]["1"]["apk_sha256"][0])

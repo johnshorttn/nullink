@@ -89,6 +89,17 @@
         "0786b25c263295fe7ea77b633c425e4bb38ad86c4df088e3c4ce49a4c29b992f"
       ],
       "revoked": false
+    },
+    "9": {
+      "version_name": "0.5.0-test",
+      "channel": "test",
+      "signing_cert_sha256": [
+        "69a9ba1dc648af702dc3fdc33e1a836fa7231ac3ec983cd82fc9c4e535fc6dcf"
+      ],
+      "apk_sha256": [
+        "f602e987c9b516efc1484b1f1e9b4cd8629eb43a71354b26e8730868dd245c29"
+      ],
+      "revoked": false
     }
   }
 }

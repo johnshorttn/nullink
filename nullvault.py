@@ -398,6 +398,10 @@ def verify_chain(chain_b64, challenge: bytes, now: float | None = None) -> dict:
         "boot_patch_level": _al_int(hw, 719),
         "app_id": app_id,
         "attested_ids": ids,
+        # 0.5.0: the key's own auth rules (hardware-enforced list): NO_AUTH_REQUIRED 503, USER_AUTH_TYPE 504,
+        # AUTH_TIMEOUT 505. Used to accept only an auth-bound, time-limited window key as K_sess.
+        "auth": {"no_auth_required": 503 in hw or 503 in sw, "user_auth_type": _al_int(hw, 504),
+                 "auth_timeout": _al_int(hw, 505)},
         "chain_sha256": [sha256_hex(c.public_bytes(_der_enc())) for c in certs],
     }
 
@@ -789,6 +793,8 @@ def _safe_dict(d, n=40) -> dict:
 
 def _refuse(h, code, reason, *, device_id=None, wipe=False, flag=False, **ctx):
     ip, ua = _ctx(h)
+    if device_id:
+        session_drop(device_id)
     if flag and device_id:
         registry_append("flag", device_id=device_id, reason=reason, ip=ip, ua=ua)
         server.vault_audit("device_flagged", device=device_id, reason=reason, ip=ip, ua=ua)
@@ -899,6 +905,77 @@ def _sync_challenge(h):
     return h._json(200, {"nonce": n, "expires_in": SYNC_TTL, "purpose": purpose})
 
 
+# ---- 0.5.0 window signing session (John 2026-11-13: one fingerprint, then a work window). Memory only.
+# A K_dev-signed request (fingerprint) may carry {"session": {"chain": [...], "ttl": s}}: the attestation chain of a
+# fresh hardware key K_sess whose challenge is the SAME single-use nonce. Once every normal check passes, K_sess may
+# sign later requests of SESSION_PURPOSES (payload "signed_by": "session") until it expires. Sync, status, approve,
+# action and register always need K_dev. Each session-signed request still has its own nonce, timestamp, fresh
+# attestation, tamper and APK pin checks; only the signing key differs. Nothing is written to the device registry.
+SESSION_PURPOSES = ("write", "files", "chat")
+SESSION_MIN_TTL = 60
+# Server-side life of a delegation (memory only; also ends on revoke, any refusal/flag, a bad signature or a restart).
+# The phone can only USE K_sess within its hardware AUTH_TIMEOUT after a Class 3 fingerprint (checked below, <= 1 h).
+SESSION_MAX_TTL = 30 * 86400
+SESSION_MAX_AUTH_TIMEOUT = 3600
+AUTH_TYPE_FINGERPRINT = 2
+_sessions: dict[str, dict] = {}
+
+
+def session_get(device_id: str):
+    with _lock:
+        s = _sessions.get(device_id)
+        if s and s["exp"] > time.time():
+            return s
+        _sessions.pop(device_id, None)
+        return None
+
+
+def session_drop(device_id: str) -> None:
+    with _lock:
+        _sessions.pop(device_id, None)
+
+
+def _session_start(h, d: dict, p: dict, purpose: str, att: dict | None = None) -> None:
+    """Registers K_sess after a fully verified K_dev request. Any problem: no session (the request itself stands)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    sess = p.get("session")
+    if not isinstance(sess, dict):
+        return
+    did = d["device_id"]
+    ip, _ua = _ctx(h)
+    try:
+        satt = verify_chain(sess.get("chain"), nonce_bytes(p["nonce"]))
+    except AttestationError as e:
+        server.vault_audit("device_session_refused", device=did, reason="attestation_invalid:" + e.reason, ip=ip)
+        return
+    if satt["verified_boot_key"] != d["verified_boot_key"] or satt["security_level"] != d["security_level"]:
+        server.vault_audit("device_session_refused", device=did, reason="hardware_changed", ip=ip)
+        return
+    a = satt.get("auth") or {}
+    to = a.get("auth_timeout")
+    if a.get("no_auth_required") or not ((a.get("user_auth_type") or 0) & AUTH_TYPE_FINGERPRINT) \
+            or not isinstance(to, int) or not 1 <= to <= SESSION_MAX_AUTH_TIMEOUT:
+        server.vault_audit("device_session_refused", device=did, reason="key_not_auth_bound", ip=ip)
+        return
+    if att is not None and satt.get("app_id") != att.get("app_id"):
+        server.vault_audit("device_session_refused", device=did, reason="app_id_mismatch", ip=ip)
+        return
+    pub = satt["leaf"].public_key()
+    if not isinstance(pub, ec.EllipticCurvePublicKey) or pub.curve.name != "secp256r1":
+        server.vault_audit("device_session_refused", device=did, reason="key_type", ip=ip)
+        return
+    try:
+        ttl = int(sess.get("ttl"))
+    except (TypeError, ValueError):
+        ttl = SESSION_MAX_TTL
+    ttl = max(SESSION_MIN_TTL, min(SESSION_MAX_TTL, ttl))
+    spki = pub.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    with _lock:
+        _sessions[did] = {"spki": spki, "exp": time.time() + ttl}
+    server.vault_audit("device_session_start", device=did, ttl=ttl, purpose=purpose, ip=ip)
+
+
 def _verify_device_request(h, purpose: str):
     """Shared sync/write checks. Returns (device, payload, att, pin) or None (response already sent)."""
     from cryptography.hazmat.primitives import serialization
@@ -916,9 +993,28 @@ def _verify_device_request(h, purpose: str):
     if not _ts_ok(p):
         h._json(403, {"error": "clock_skew"})
         return None
-    pub = serialization.load_der_public_key(b64d(d["pubkey_spki"]))
-    if not verify_sig(pub, raw, sig):
-        _refuse(h, 403, "bad_signature", device_id=did, wipe=True, flag=True)
+    signed_by = p.get("signed_by") or "device"
+    if signed_by == "session":
+        if purpose not in SESSION_PURPOSES:
+            h._json(403, {"error": "session_not_allowed"})
+            return None
+        s = session_get(did)
+        if not s:
+            h._json(401, {"error": "session_expired"})
+            return None
+        if not verify_sig(serialization.load_der_public_key(s["spki"]), raw, sig):
+            session_drop(did)
+            server.vault_audit("device_session_refused", device=did, reason="bad_signature", ip=_ctx(h)[0])
+            h._json(403, {"error": "session_invalid"})
+            return None
+    elif signed_by == "device":
+        pub = serialization.load_der_public_key(b64d(d["pubkey_spki"]))
+        if not verify_sig(pub, raw, sig):
+            session_drop(did)
+            _refuse(h, 403, "bad_signature", device_id=did, wipe=True, flag=True)
+            return None
+    else:
+        h._json(400, {"error": "bad_request"})
         return None
     apk, state, dev = p.get("apk") or {}, p.get("state") or {}, p.get("device") or {}
     try:
@@ -962,6 +1058,8 @@ def _verify_device_request(h, purpose: str):
     registry_append("sync_report", device_id=did, purpose=purpose, attestation=_att_record(att),
                     apk=_safe_dict(apk), state=_safe_dict(state), assurance=_assurance(att, state),
                     note=patch_note, ip=ip, ua=ua)
+    if signed_by == "device" and purpose in ("sync",) + SESSION_PURPOSES:
+        _session_start(h, d, p, purpose, att)
     return d, p, att, pin
 
 
@@ -1124,6 +1222,7 @@ def _admin_revoke(h, device_id):
     d = devices().get(device_id)
     if not d:
         return h._json(404, {"error": "not_found"})
+    session_drop(device_id)
     if d["status"] != "revoked":
         registry_append("revoke", device_id=device_id, by="owner", ip=ip, ua=ua)
         server.vault_audit("device_revoke", device=device_id, ip=ip, ua=ua)
