@@ -4179,7 +4179,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("index.html", "text/html; charset=utf-8")
         if path == "/app.js":
             return self._serve_static("app.js", "application/javascript; charset=utf-8")
-        if path in ("/files-manager.js", "/fm-sort.js"):
+        if path in ("/files-manager.js", "/fm-sort.js", "/vault-devices.js"):
             return self._serve_static(path[1:], "application/javascript; charset=utf-8")
         if path in ("/editor.js", "/sanitize.js"):
             return self._serve_static(path[1:], "application/javascript; charset=utf-8")

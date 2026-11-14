@@ -138,6 +138,7 @@ Recommended first allowlist if John agrees: `NULLVAULT_ACTIONS=1`, `NULLVAULT_AC
 - Full: revert the merge commit and redeploy. `data/nullvault/` can stay (inert) or be archived by root
   (`chattr -a` first if it was set).
 - Revoke a single phone any time: Nullink owner session -> `POST /api/vault/devices/<id>/revoke` with a TOTP code.
+  Web: Vault tab -> Devices -> Revoke (one device) or Revoke all / Revoke selected (`POST /api/vault/devices/revoke-batch`, one code for the set).
 
 ## Honest limits
 - Not end-to-end: the server decrypts entries for sync, same exposure as today's vault.

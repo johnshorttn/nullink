@@ -497,6 +497,18 @@
               <button type="button" id="vault-new-btn-main" class="ghost toolbar-btn">New</button>
             </div>
           </header>
+          <details id="vault-devices" class="vault-devices hidden" open>
+            <summary>Devices</summary>
+            <p id="vault-devices-hint" class="hint"></p>
+            <div class="vault-devices-actions">
+              <button type="button" id="vault-devices-revoke-all" class="ghost tiny fm-danger" disabled>Revoke all</button>
+              <button type="button" id="vault-devices-revoke-selected" class="ghost tiny" disabled>Revoke selected</button>
+              <button type="button" id="vault-devices-refresh" class="ghost tiny">Refresh</button>
+            </div>
+            <div id="vault-devices-confirm" class="vault-devices-confirm hidden"></div>
+            <p id="vault-devices-status" class="vault-devices-status" role="status" aria-live="polite"></p>
+            <ul id="vault-devices-list" class="vault-devices-list"></ul>
+          </details>
           <div id="vault-editor-empty" class="editor-empty">
             <p>OTP-gated notes — not in chat history. Stored under <code>data/vault/</code> (mode 0600).</p>
             <p class="hint">Create a snippet from the sidebar or <strong>New</strong>.</p>
@@ -695,6 +707,7 @@
   <script src="/sanitize.js?v=ed1"></script>
   <script src="/favorites.js?v=fav2"></script>
   <script src="/fm-sort.js?v=fs1"></script>
+  <script src="/vault-devices.js?v=vd1"></script>
   <script src="/files-manager.js?v=fm5-fs3"></script>
   <script src="/server-drive.js?v=sd3"></script>
   <script type="module" src="/editor.js?v=ed1"></script>

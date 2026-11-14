@@ -886,6 +886,7 @@
       }
       setMode("vault");
       loadVaultList();
+      loadVaultDevices();
     } else if (next === "mail") {
       // Nullmail is full-mode only (not a split secondary)
       if (layout.split) {
@@ -3158,6 +3159,16 @@ btnSplit.addEventListener("click", () => {
       li.addEventListener("click", () => openVaultItem(it.id));
       vaultList.appendChild(li);
     });
+  }
+
+  // Vault -> Devices (static/vault-devices.js): owner session only; hidden for guests.
+  let vaultDevicesUi = null;
+  function loadVaultDevices() {
+    try {
+      if (!window.NLVaultDevices) return;
+      if (!vaultDevicesUi) vaultDevicesUi = window.NLVaultDevices.mount({ doc: document, fetch: window.fetch.bind(window) });
+      if (vaultDevicesUi) vaultDevicesUi.refresh();
+    } catch (_) {}
   }
 
   async function loadVaultList(q) {

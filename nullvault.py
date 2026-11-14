@@ -14,6 +14,7 @@ Routes (all 404 while the flag is off):
   POST /api/vault/device/write                Bearer + signed envelope -> create/update/delete
   GET  /api/vault/devices                     owner cookie -> device list
   POST /api/vault/devices/<id>/revoke         owner cookie + Origin + TOTP -> revoked now
+  POST /api/vault/devices/revoke-batch        owner cookie + Origin + ONE TOTP + {device_ids|all} -> per-device results
 
 Registry: DATA/nullvault/devices.jsonl, append-only, hash-chained, mode 600 (chattr +a at deploy).
 X.509 / ECDSA / Ed25519 use `cryptography`, which server.py already depends on for vault AES-GCM.
@@ -60,6 +61,9 @@ ROUTES_POST = {
     "/api/vault/sync-challenge", "/api/vault/sync", "/api/vault/device/write",
 }
 REVOKE_RE = re.compile(r"^/api/vault/devices/(dev_[0-9a-f]{16})/revoke$")
+REVOKE_BATCH_PATH = "/api/vault/devices/revoke-batch"   # 2026-11-14: several devices, ONE TOTP code (owner browser only)
+DEVICE_ID_RE = re.compile(r"dev_[0-9a-f]{16}")
+REVOKE_BATCH_MAX = 50
 FILES_RE = re.compile(r"^/api/vault/files(?:/session|/([A-Za-z0-9_-]{1,64})/download|/uploads/([a-f0-9]{24})(/chunk|/complete|/cancel)?)?$")
 
 _lock = threading.RLock()
@@ -125,7 +129,7 @@ def handles(method: str, path: str) -> bool:
     if path in STAGE3_ROUTES:
         return method in ("GET", "POST")
     if method == "POST":
-        return path in ROUTES_POST or bool(REVOKE_RE.match(path))
+        return path in ROUTES_POST or path == REVOKE_BATCH_PATH or bool(REVOKE_RE.match(path))
     if method == "GET":
         return path in ("/api/vault/devices", "/api/vault/links")
     return False
@@ -696,6 +700,8 @@ def handle(h, method: str, path: str) -> None:
     try:
         if method == "GET":
             return _admin_list(h)
+        if path == REVOKE_BATCH_PATH:
+            return _admin_revoke_batch(h)
         m = REVOKE_RE.match(path)
         if m:
             return _admin_revoke(h, m.group(1))
@@ -1245,15 +1251,59 @@ def _admin_revoke(h, device_id):
     err = _totp_gate(h, (h._read_json() or {}).get("code"))
     if err:
         return h._json(*err)
+    st = _revoke_one(device_id, ip, ua)
+    if st == "not_found":
+        return h._json(404, {"error": "not_found"})
+    return h._json(200, {"ok": True, "device_id": device_id, "status": "revoked"})
+
+
+def _revoke_one(device_id: str, ip: str, ua: str, batch: bool = False) -> str:
+    """-> "revoked" | "already_revoked" | "not_found". Caller has done the owner + Origin + TOTP checks."""
     d = devices().get(device_id)
     if not d:
-        return h._json(404, {"error": "not_found"})
+        return "not_found"
     session_drop(device_id)
-    if d["status"] != "revoked":
-        registry_append("revoke", device_id=device_id, by="owner", ip=ip, ua=ua)
-        server.vault_audit("device_revoke", device=device_id, ip=ip, ua=ua)
-        alert(f":lock: *NullVault* revoked `{device_id}`. It wipes at next contact.")
-    return h._json(200, {"ok": True, "device_id": device_id, "status": "revoked"})
+    if d["status"] == "revoked":
+        return "already_revoked"
+    registry_append("revoke", device_id=device_id, by="owner", ip=ip, ua=ua)
+    server.vault_audit("device_revoke", device=device_id, ip=ip, ua=ua, **({"batch": True} if batch else {}))
+    alert(f":lock: *NullVault* revoked `{device_id}`. It wipes at next contact.")
+    return "revoked"
+
+
+def _admin_revoke_batch(h):
+    """POST /api/vault/devices/revoke-batch {code, device_ids:[...]} or {code, all:true}.
+    Same gate as _admin_revoke (no Authorization header, allowed Origin, owner session not guest, TOTP with the
+    login lockout), checked once per request: ONE code revokes the whole set. Per-device audit + alert + result."""
+    ip, ua = _ctx(h)
+    if h.headers.get("Authorization") is not None:
+        return h._json(403, {"error": "forbidden", "message": "Owner browser session only."})
+    if h.headers.get("Origin") not in server.SSH_ALLOWED_ORIGINS:
+        return h._json(403, {"error": "bad_origin"})
+    if h._require_owner() is None:
+        return
+    body = h._read_json() or {}
+    # Validate the target set BEFORE the code is spent, so a bad request never burns John's code.
+    if body.get("all") is True:
+        if body.get("device_ids"):
+            return h._json(400, {"error": "bad_request", "message": "Send device_ids or all, not both."})
+        ids = [d["device_id"] for d in devices().values() if d.get("status") != "revoked"]
+    else:
+        raw = body.get("device_ids")
+        if not isinstance(raw, list) or not raw or len(raw) > REVOKE_BATCH_MAX \
+                or not all(isinstance(x, str) and DEVICE_ID_RE.fullmatch(x) for x in raw):
+            return h._json(400, {"error": "bad_request", "message": "device_ids: 1-50 ids like dev_0123456789abcdef"})
+        ids = list(dict.fromkeys(raw))
+    if not ids:
+        return h._json(409, {"error": "no_devices", "message": "No active devices to revoke."})
+    err = _totp_gate(h, body.get("code"))
+    if err:
+        return h._json(*err)
+    results = [{"device_id": i, "status": _revoke_one(i, ip, ua, batch=True)} for i in ids]
+    server.vault_audit("device_revoke_batch", count=len(ids),
+                       revoked=sum(1 for x in results if x["status"] == "revoked"), ip=ip, ua=ua)
+    return h._json(200, {"ok": True, "results": results,
+                         "revoked": sum(1 for x in results if x["status"] == "revoked")})
 
 
 # ---------------------------------------------------------------- CLI (root / nullink on the box)

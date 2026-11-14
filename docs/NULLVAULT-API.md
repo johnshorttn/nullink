@@ -170,6 +170,21 @@ Owner cookie + `Origin` in the allowed list + `{"code":"<TOTP>"}` (same lockout)
 contact from that device gets `403 revoked` + `wipe:true`.
 `200 {"ok":true,"device_id":"…","status":"revoked"}`.
 
+### 5.3 `POST /api/vault/devices/revoke-batch` (2026-11-14)
+Same gate as 5.2 (no `Authorization` header -> 403 "Owner browser session only."; `Origin` in the allowed list;
+owner cookie session, not guest; TOTP with the login lockout), checked **once per request**: one code revokes the
+whole set. Body `{"code":"<TOTP>","device_ids":["dev_…", …]}` (1-50, de-duplicated) or `{"code":"<TOTP>","all":true}`
+(every device not already revoked). The target set is validated before the code is checked, so a malformed
+request never spends it: 400 `bad_request`, 409 `no_devices`. Per device: registry `revoke` entry, audit
+`device_revoke` (`batch: true`), alert, session dropped. Plus one `device_revoke_batch` audit summary.
+`200 {"ok":true,"revoked":N,"results":[{"device_id","status":"revoked|already_revoked|not_found"}]}`.
+
+### 5.4 Web UI
+Nullink web app -> **Vault** tab -> **Devices** (owner session only; hidden for guests): device id, model, status,
+last seen (ET). Per active device **Revoke** -> inline 6-digit code box -> **Confirm** (5.2). **Revoke all** /
+checkboxes + **Revoke selected** -> confirm list -> one code -> **Confirm revoke (N)** (5.3). The code field is
+cleared before each request; nothing is logged or stored.
+
 ## 6. Registry (`data/nullvault/devices.jsonl`)
 Append-only JSONL, mode 600, dir 700, hash-chained: every row has `prev` (SHA-256 of the previous
 raw line, `"0"*64` for the first) and `h` (SHA-256 of the row without `h`). Row kinds: `register`,
