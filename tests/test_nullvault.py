@@ -394,7 +394,7 @@ class CapRevokeTests(NullVaultBase):
 
     def test_unknown_token(self):
         st, _, js, _ = self.req("/api/vault/sync-challenge", "POST", {}, headers={"Authorization": "Bearer nvd_nope"})
-        self.assertEqual((st, js.get("wipe")), (401, True))
+        self.assertEqual((st, js.get("wipe")), (401, None))  # 0.5.1: unknown token = recoverable
 
 
 class ApkTamperPatchTests(NullVaultBase):
@@ -409,7 +409,7 @@ class ApkTamperPatchTests(NullVaultBase):
         for apk, kd, want in cases:
             r = self.register(apk=apk, kd_kw=kd, expect=403)
             self.assertEqual(r["js"]["error"], want)
-            self.assertTrue(r["js"].get("wipe"))
+            self.assertFalse(r["js"].get("wipe"))  # 0.5.1: refused at register, never a wipe
 
     def test_tamper_in_process_refused_but_root_and_adb_allowed(self):
         for t, want in (({"frida": True}, "tamper_detected:frida"), ({"xposed": True}, "tamper_detected:xposed"),
@@ -422,7 +422,7 @@ class ApkTamperPatchTests(NullVaultBase):
     def test_sync_apk_change_flags_device(self):
         dev = self.register()
         st, js, _, _ = self.sync(dev, apk=self.apk(base_apk_sha256="ee" * 32))
-        self.assertEqual((st, js["error"], js["wipe"]), (403, "apk_mismatch:apk_hash_mismatch", True))
+        self.assertEqual((st, js["error"], js.get("wipe")), (403, "apk_mismatch:apk_hash_mismatch", None))  # 0.5.1: lockout, no wipe
         st, _, js, _ = self.sync_challenge(dev)
         self.assertEqual((st, js["error"]), (403, "flagged"))
 
@@ -442,7 +442,7 @@ class ApkTamperPatchTests(NullVaultBase):
         m = json.loads(base64.b64decode(js["pins"]["payload"]))
         self.assertEqual((m["version_code"], m["apk_sha256"]), (2, [apk2]))
         st, js, _, _ = self.sync(dev, apk=self.apk(version_code=2, base_apk_sha256="ee" * 32), kd_kw={"version": 2})
-        self.assertEqual((st, js["error"], js["wipe"]), (403, "apk_mismatch:apk_hash_mismatch", True))
+        self.assertEqual((st, js["error"], js.get("wipe")), (403, "apk_mismatch:apk_hash_mismatch", None))  # 0.5.1: lockout, no wipe
 
     def test_v5_to_v6_inplace_update_confirmed_at_sync(self):
         """0.4.2 upgrade: with the real example pins, a phone registered on v5 that installs v6 in place syncs
@@ -478,7 +478,7 @@ class ApkTamperPatchTests(NullVaultBase):
         st, js, _, _ = self.sync(other, apk=apk(old, ro["apk_sha256"][0]), kd_kw={"version": old, "digests": tuple(certs)})
         self.assertEqual(st, 200, js)
         st, js, _, _ = self.sync(other, apk=apk(new, "ee" * 32), kd_kw={"version": new, "digests": tuple(certs)})
-        self.assertEqual((st, js["error"], js["wipe"]), (403, "apk_mismatch:apk_hash_mismatch", True))
+        self.assertEqual((st, js["error"], js.get("wipe")), (403, "apk_mismatch:apk_hash_mismatch", None))  # 0.5.1: lockout, no wipe
 
     def test_newer_patch_accepted_older_refused(self):
         dev = self.register(kd_kw={"patch": 202609})

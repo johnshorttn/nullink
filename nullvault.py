@@ -792,6 +792,9 @@ def _safe_dict(d, n=40) -> dict:
 
 
 def _refuse(h, code, reason, *, device_id=None, wipe=False, flag=False, **ctx):
+    """0.5.1 (John 2026-11-13, after the v9 false tamper wipe): a failed server check is a recoverable lockout
+    (refused, optionally flagged for review), never a remote wipe. Only an explicit revoke wipes. `wipe` is ignored."""
+    wipe = False
     ip, ua = _ctx(h)
     if device_id:
         session_drop(device_id)
@@ -883,13 +886,13 @@ def _device_from_bearer(h):
     d = device_by_token(h._bearer_token())
     if not d:
         server.vault_audit("device_auth_failed", ip=_ctx(h)[0])
-        h._json(401, {"error": "unauthorized", "wipe": True})
+        h._json(401, {"error": "unauthorized"})  # 0.5.1: recoverable (re-register), never a wipe
         return None
-    if d["status"] == "revoked":
+    if d["status"] == "revoked":  # explicit owner revoke: the only server answer that wipes a phone
         h._json(403, {"error": "revoked", "wipe": True})
         return None
     if d["status"] == "flagged":
-        h._json(403, {"error": "flagged", "wipe": True})
+        h._json(403, {"error": "flagged", "message": "This phone is locked by the server for review. Nothing was wiped."})
         return None
     return d
 

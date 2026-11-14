@@ -443,7 +443,7 @@ def files_session(h):
         return None
     d = nv.devices().get(rec["device_id"])
     if not d or d["status"] != "active":
-        h._json(403, {"error": (d or {}).get("status") or "unauthorized", "wipe": True})
+        h._json(403, {"error": (d or {}).get("status") or "unauthorized", **({"wipe": True} if (d or {}).get("status") == "revoked" else {})})
         return None
     return d
 
@@ -757,7 +757,7 @@ class SessionStore:
             return None
         d = nv.devices().get(rec["device_id"])
         if not d or d["status"] != "active":
-            h._json(403, {"error": (d or {}).get("status") or "unauthorized", "wipe": True})
+            h._json(403, {"error": (d or {}).get("status") or "unauthorized", **({"wipe": True} if (d or {}).get("status") == "revoked" else {})})
             return None
         return d
 

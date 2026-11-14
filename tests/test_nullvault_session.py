@@ -123,10 +123,10 @@ class SessionKeyTests(NullVaultBase):
         st, js, _, _ = self.session_write(ks2)
         self.assertEqual((st, js.get("error")), (403, "session_invalid"))
 
-    def test_kdev_bad_signature_still_flags_and_wipes(self):
+    def test_kdev_bad_signature_still_flags_no_wipe(self):
         self.start_session()
         st, js, _, _ = self.write(self.dev, "create", {"title": "Z"}, sign_key=ec.generate_private_key(ec.SECP256R1()))
-        self.assertEqual((st, js.get("error"), js.get("wipe")), (403, "bad_signature", True))
+        self.assertEqual((st, js.get("error"), js.get("wipe")), (403, "bad_signature", None))
         self.assertEqual(self.devices_status(), "flagged")
         self.assertIsNone(nullvault.session_get(self.dev["js"]["device_id"]))
 
