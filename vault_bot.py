@@ -182,6 +182,9 @@ def _read(h, name, ip, ua):
     if not item:
         server.vault_audit("bot_read_denied", reason="not_found", id=vid, source=name, ip=ip, ua=ua)
         return h._json(404, {"error": "not_found"})
+    if item.get("e2e"):  # 0.6.0: end-to-end encrypted; the server (and so the bot) cannot read it
+        server.vault_audit("bot_read_denied", reason="e2e_item", id=vid, source=name, ip=ip, ua=ua)
+        return h._json(409, {"error": "e2e_item", "message": server.VAULT_E2E_MESSAGE})
     server.vault_audit("bot_read", id=vid, source=name, ip=ip, ua=ua)
     return h._json(200, {"item": {k: item.get(k) for k in ("id", "title", "body", "tags", "created_at")},
                          "single_use": True})

@@ -662,6 +662,8 @@ def handle(h, method: str, path: str) -> None:
     server = sys.modules[type(h).__module__]
     import nullvault_ext as ext
     ext.bind(sys.modules[__name__], server)
+    import nullvault_e2e
+    nullvault_e2e.bind(sys.modules[__name__], server)
     if not enabled():
         return h._json(404, {"error": "not_found"})
     if path.startswith("/api/vault/files"):
@@ -1072,20 +1074,17 @@ def _sync(h):
         return
     d, p, _att, pin = r
     ip, ua = _ctx(h)
-    entries = []
-    for meta in server.list_vault_snippets():
-        try:
-            item = server.load_vault_snippet(meta["id"], decrypt=True)
-        except server.VaultIntegrityError:
-            server.vault_audit("integrity_failure", id=meta["id"], device=d["device_id"], ip=ip, ua=ua)
-            continue
-        if item:
-            entries.append({k: item.get(k) for k in ("id", "title", "tags", "body", "created_at", "updated_at")})
+    import nullvault_e2e as e2e
+    if e2e.old_client(p):  # 0.6.0: E2E vault; a pre-0.6.0 app gets a clean, recoverable refusal (no wipe, no flag)
+        return e2e.refuse_old(h, d["device_id"])
+    entries = e2e.sync_entries(lambda vid: server.vault_audit("integrity_failure", id=vid, device=d["device_id"], ip=ip, ua=ua))
+    entries.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
     server.vault_audit("device_sync", device=d["device_id"], count=len(entries), ip=ip, ua=ua)
     now = time.time()
     import nullvault_ext as ext
     return h._json(200, {"entries": entries, "count": len(entries), "lease": make_lease(d["device_id"], now),
                          "pins": pins_manifest(pin, p["apk"]["version_code"]), "server_time": int(now),
+                         "e2e": e2e.public_header(), "e2e_min_version_code": e2e.E2E_MIN_VC,
                          **ext.sync_extras()})
 
 
@@ -1097,6 +1096,23 @@ def _write(h):
     ip, ua = _ctx(h)
     op = p.get("op")
     kind = p.get("kind") or "entry"
+    import nullvault_e2e as e2e
+    if kind in ("entry", "note", "e2e") and e2e.old_client(p):
+        return e2e.refuse_old(h, d["device_id"])
+    if kind == "e2e":  # 0.6.0: wrapped-VK header (init / rewrap); K_dev (fingerprint) only
+        st, body = e2e.header_write(p)
+        if st != 200:
+            return h._json(st, body)
+        registry_append("write", device_id=d["device_id"], record="e2e_header", op=op, ip=ip, ua=ua)
+        server.vault_audit("device_write", device=d["device_id"], kind="e2e_header", op=op, ip=ip, ua=ua)
+        return h._json(200, {"ok": True, "op": op, **body, "lease": make_lease(d["device_id"], time.time())})
+    if kind == "entry" and op != "delete" and e2e.header() is not None:
+        st, body, rid = e2e.entry_write(p, op)
+        if st != 200:
+            return h._json(st, body)
+        registry_append("write", device_id=d["device_id"], op=op, entry_id=rid, e2e=True, ip=ip, ua=ua)
+        server.vault_audit("device_write", device=d["device_id"], op=op, id=rid, e2e=True, ip=ip, ua=ua)
+        return h._json(200, {"ok": True, "op": op, **body, "lease": make_lease(d["device_id"], time.time())})
     if kind != "entry":
         return _write_ext(h, d, p, kind, op)
     e = p.get("entry") if isinstance(p.get("entry"), dict) else {}
@@ -1139,10 +1155,17 @@ def _write_ext(h, d, p, kind, op):
         if not ext.links_enabled() or (kind == "note" and not ext.notes_enabled()):
             return h._json(404, {"error": "not_found"})
         rec = p.get(kind) if isinstance(p.get(kind), dict) else {}
-        st, body = ext.write_record(kind, op, rec, p.get("base_updated_at"))
-        if st != 200:
-            return h._json(st, body)
-        rid = body[kind]["id"]
+        import nullvault_e2e as e2e
+        res = e2e.note_write(p, op, ext) if kind == "note" and e2e.header() is not None else None
+        if res is not None:
+            st, body, rid = res
+            if st != 200:
+                return h._json(st, body)
+        else:
+            st, body = ext.write_record(kind, op, rec, p.get("base_updated_at"))
+            if st != 200:
+                return h._json(st, body)
+            rid = body[kind]["id"]
     elif kind == "file":
         if not ext.files_enabled():
             return h._json(404, {"error": "not_found"})
@@ -1249,6 +1272,9 @@ def main(argv):
     a.add_argument("--cert-sha256", action="append", required=True)
     a.add_argument("--apk-sha256", action="append", required=True)
     r = sub.add_parser("pin-revoke"); r.add_argument("--version-code", type=int, required=True)
+    rk = sub.add_parser("retire-legacy-key", help="0.6.0: refuse unless every vault item is E2E; --confirm writes the retire marker")
+    rk.add_argument("--confirm", action="store_true")
+    sub.add_parser("e2e-status", help="0.6.0: E2E header present? legacy item counts (no secrets)")
     sub.add_parser("list"); sub.add_parser("verify")
     g = sub.add_parser("gen-lease-key", help="write a new Ed25519 lease key (base64) to a 0600 file")
     g.add_argument("--out", required=True)
@@ -1269,6 +1295,21 @@ def main(argv):
             rel["revoked"] = True
             server._atomic_write_json(pins_file(), pins)
         print("revoked" if rel else "not found")
+    elif args.cmd in ("retire-legacy-key", "e2e-status"):
+        import nullvault_e2e as e2e
+        import nullvault_ext as ext
+        me = sys.modules[__name__]
+        e2e.bind(me, server); ext.bind(me, server)
+        if args.cmd == "e2e-status":
+            inv = e2e.legacy_inventory(ext)
+            hd = e2e.header()
+            print(f"e2e header: {'yes (vk_id ' + hd['vk_id'][:8] + '…, gen ' + str(hd.get('gen')) + ')' if hd else 'no'}")
+            print(f"legacy entries: {len(inv['legacy_entries'])} (awaiting confirm: {len(inv['pending_confirm'])}), "
+                  f"legacy notes: {len(inv['legacy_notes'])}, retired marker: {e2e.retired_marker().exists()}")
+            return 0
+        code, msg = e2e.retire_legacy_key(ext, args.confirm)
+        print(msg)
+        return code
     elif args.cmd == "list":
         for d in devices().values():
             print(d["device_id"], d["status"], d.get("assurance"), d.get("manufacturer"), d.get("model"), d.get("last_seen_at"))

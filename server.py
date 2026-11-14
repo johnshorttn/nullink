@@ -744,6 +744,18 @@ class VaultIntegrityError(Exception):
     pass
 
 
+class VaultE2EItem(Exception):
+    """0.6.0: an end-to-end encrypted item; the server cannot read or rewrite its contents."""
+
+
+VAULT_E2E_TITLE = "Encrypted item (open in NullVault)"
+VAULT_E2E_MESSAGE = "End-to-end encrypted: only NullVault on John's phone can open or change it."
+
+
+def vault_legacy_key_retired() -> bool:
+    return (DATA / "nullvault" / "legacy_key_retired.json").exists()
+
+
 def _vault_key() -> bytes:
     paths = []
     d = os.environ.get("CREDENTIALS_DIRECTORY")
@@ -771,6 +783,8 @@ def vault_key_available() -> bool:
 
 def vault_encrypt(vid: str, body: str) -> dict:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    if vault_legacy_key_retired():  # 0.6.0: after retire-legacy-key nothing new is encrypted with the server key
+        raise VaultKeyUnavailable("legacy vault key retired")
     nonce = secrets.token_bytes(12)
     ct = AESGCM(_vault_key()).encrypt(nonce, body.encode("utf-8"), VAULT_AAD_PREFIX + vid.encode())
     return {"v": 1, "alg": "AES-256-GCM", "n": base64.b64encode(nonce).decode(),
@@ -828,8 +842,11 @@ def load_vault_snippet(vid: str, decrypt: bool = True) -> dict | None:
         "tags": _normalize_vault_tags(data.get("tags")),
         "created_at": data.get("created_at"),
         "updated_at": data.get("updated_at"),
-        "encrypted": isinstance(data.get("enc"), dict),
+        "encrypted": isinstance(data.get("enc"), dict) or isinstance(data.get("e2e"), dict),
     }
+    if isinstance(data.get("e2e"), dict):  # 0.6.0: ciphertext only; never decryptable here
+        out.update(title=out["title"] or VAULT_E2E_TITLE, body=VAULT_MASK, locked=True, e2e=True)
+        return out
     if not decrypt:
         out.update(body=VAULT_MASK, locked=True)
         return out
@@ -926,6 +943,9 @@ def save_vault_snippet(entry: dict) -> dict:
     """Encrypts the body with a fresh nonce on every write. Returns metadata + plaintext body."""
     ensure_dirs()
     vid = _vault_safe_id(str(entry.get("id") or "")) or uuid.uuid4().hex[:12]
+    prior = _vault_read_raw(vid)
+    if prior and isinstance(prior.get("e2e"), dict):
+        raise VaultE2EItem(vid)  # never overwrite ciphertext with a server-readable copy
     now = iso_now()
     body = str(entry.get("body") or "")[:100_000]
     out = {
@@ -5201,6 +5221,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(500, {"error": "vault_integrity", "message": "This entry failed its integrity check."})
         if not item:
             return self._json(404, {"error": "not_found"})
+        if item.get("e2e"):
+            vault_audit("view_e2e", id=vid, ip=ip, ua=ua, session=rec.get("id"))
+            return self._json(200, {"item": item, "locked": True, "e2e": True, "message": VAULT_E2E_MESSAGE})
         vault_audit("decrypt_view", id=vid, ip=ip, ua=ua, session=rec.get("id"))
         remaining = int(SSH_STEPUP_WINDOW_SEC - (time.time() - float(rec.get("ssh_stepup_at") or 0)))
         return self._json(200, {"item": item, "locked": False, "unlocked_for_sec": max(0, remaining)})
@@ -5240,6 +5263,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(500, {"error": "vault_integrity"})
         if not existing:
             return self._json(404, {"error": "not_found"})
+        if existing.get("e2e"):
+            return self._json(409, {"error": "e2e_item", "message": VAULT_E2E_MESSAGE})
         if "title" in body and body["title"] is not None:
             existing["title"] = str(body["title"]).strip()[:200] or existing["title"]
         if "body" in body and body["body"] is not None:

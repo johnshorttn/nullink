@@ -172,9 +172,15 @@ def note_from(e: dict, cur: dict | None = None) -> dict | None:
 
 
 def note_plain(n: dict) -> dict:
+    if isinstance(n.get("e2e"), dict):  # 0.6.0 E2E note: ciphertext only, the server cannot read it
+        return {"id": n["id"], "project_id": n.get("project_id"), "e2e": n["e2e"], "ver": n.get("ver"),
+                "created_at": n.get("created_at"), "updated_at": n.get("updated_at")}
     d = json.loads(server.vault_decrypt(_note_aad(n["id"]), n["enc"]))
-    return {"id": n["id"], "project_id": n["project_id"], "title": d.get("title") or "", "body": d.get("body") or "",
-            "created_at": n.get("created_at"), "updated_at": n.get("updated_at")}
+    out = {"id": n["id"], "project_id": n["project_id"], "title": d.get("title") or "", "body": d.get("body") or "",
+           "created_at": n.get("created_at"), "updated_at": n.get("updated_at")}
+    if isinstance(n.get("e2e_pending"), dict):
+        out["e2e_pending"] = n["e2e_pending"]
+    return out
 
 
 KINDS = {"link": ("links.json", link_from, MAX_LINKS), "project": ("projects.json", project_from, MAX_PROJECTS),
