@@ -178,3 +178,42 @@ in `data/nullvault/config.json`; `data/nullvault/config_state.json` holds the mo
 changes). Security policy is hardcoded in the APK (fingerprint window, tamper checks, E2E crypto, wipe/lock, cert pin,
 device cap) and forbidden or unknown keys are ignored by the phone and refused by the server. `nullvault.py config-show`
 prints the public key and version. If the key is lost, generate a new one and ship an APK pinning the new public key.
+
+## 0.8.0: bot-to-vault import queue (2026-11-14)
+
+John (11:21 PM ET): "Build an import tool that bots can access to add an entry. Have it submitted like an approval
+import. It would show up as an alert saying import needed. Then I sync and process it." Code: `nullvault_import.py`.
+
+- **Phone import key.** After unlock + Sync (E2E on), the phone makes an X25519 key pair. The private half stays in the
+  phone's SQLCipher database, sealed with the vault key; the public half is published with a K_dev-signed request
+  (fingerprint, purpose `import_key`) to `POST /api/vault/import/key`. The server keeps the signed envelope, and hands
+  out keys only for active devices, so revoking a phone removes its key. "New key" in Settings › Bot imports rotates it.
+- **Submitters.** Import-only tokens (`nlvi_…`, SHA-256 in `data/nullvault/import_tokens.json`, minted with
+  `nullvault.py import-token-add --name … --label … --out <new 0600 file>`; never printed). Scope `vault:import`:
+  `GET /api/vault/import/keys`, `POST /api/vault/import/submit`, `GET /api/vault/import/status` (own submissions only).
+  Every other route rejects the token. Limits: 20 submissions/hour and 20 pending per token, 48 KB sealed per device,
+  256 KB request, title 1–120 chars, type `login|note|secret|key`, no unknown fields (no target id, so no overwrite).
+- **Sealing (client side).** Verify the key's device signature against `device_pubkey_spki` (`verify_publication`),
+  then X25519(ephemeral, phone) → HKDF-SHA256(salt = epk‖phone pub, info `nullvault-import-v1`) → AES-256-GCM with
+  AAD `nullvault-import-v1|import_id|submitter|device_id|kid`. Body `{v:1, type, title, fields}`.
+  **The title and type are metadata the server (and the Slack alert) can see: keep secrets out of titles.**
+- **Server storage.** `data/nullvault/imports.json` (metadata) and `data/nullvault/imports/<id>.json` (sealed blob
+  only). The server has no key that opens a blob.
+- **Alert.** Each submission sends the Slack DM "Import needed. <bot> sent "<title>" (<type>)…"; the phone shows the
+  count on the Approvals badge and lists them at the top of Approvals after open/Sync.
+- **Approve / reject.** `GET /api/vault/import/pending` (device token) → review decrypted in memory → Approve = K_dev
+  fingerprint `POST /api/vault/import/decide` with a new E2E entry (ver 1, phone-chosen new id; an existing id is
+  refused) → the server stores it with `add_only: true` and returns it as read from disk → the phone decrypts and
+  compares → `POST /api/vault/import/ack` (K_dev or the window session key, read-back SHA-256) → the sealed blob is
+  deleted. Reject (fingerprint) deletes the blob. For the config-signing key the phone also checks that the key's
+  public key equals the one pinned in the APK before Approve is enabled.
+- **Add-only.** Entries with `add_only` are refused for update/delete on phone writes, owner web PATCH/DELETE,
+  `save_vault_snippet`/`delete_vault_snippet` and label rename. The phone hides Edit/Delete for them.
+- **Expiry.** Pending imports expire after 7 days (a week covers a phone left at home over a weekend; an unopened secret
+  shouldn't sit on the server longer). Expired blobs are purged on every import call and hourly; decided/expired
+  metadata is dropped after 30 days. `nullvault.py import-purge` runs it by hand.
+- **Audit.** `import_submit`, `import_approve`, `import_ack`, `import_reject`, `import_expire`, `import_purged`,
+  `import_key_published`, `import_token_added/revoked`, `import_auth_failed`: ids, sizes and device ids only.
+- **Submit CLI.** `nullvault.py import-submit --file-ref config-signing-key` (as nullink) seals the config-signing key
+  file, read in memory only, and submits it as "NullVault settings-signing key (v12)" with the Forge token
+  (`secrets/nullvault_import_forge.token`). Only named references exist; no paths. It prints ids only.

@@ -203,6 +203,8 @@ def entry_write(p: dict, op: str):
             return 404, {"error": "not_found"}, None
         base = p.get("base_updated_at")
         if op == "update":
+            if cur.get("add_only"):
+                return 409, {"error": "add_only", "message": "Imported entries are add-only: they cannot be edited or deleted."}, None
             if base and base != cur.get("updated_at"):
                 return 409, {"error": "conflict", "entry": _meta({**cur, "id": vid})}, None
             want = int(cur.get("ver") or 0) + 1 if is_e2e(cur) else 1
@@ -243,8 +245,11 @@ def sync_entries(audit) -> list[dict]:
             continue
         vid = str(rec.get("id") or fp.stem)
         if is_e2e(rec):
-            out.append({"id": vid, "e2e": rec["e2e"], "ver": rec.get("ver"), "created_at": rec.get("created_at"),
-                        "updated_at": rec.get("updated_at")})
+            row = {"id": vid, "e2e": rec["e2e"], "ver": rec.get("ver"), "created_at": rec.get("created_at"),
+                   "updated_at": rec.get("updated_at")}
+            if rec.get("add_only"):                       # 0.8.0 imported entry: the phone hides Edit/Delete
+                row.update(add_only=True, imported_from=rec.get("imported_from"))
+            out.append(row)
             continue
         try:
             item = server.load_vault_snippet(vid, decrypt=True)
@@ -299,6 +304,8 @@ def note_write(p: dict, op: str, ext):
             return 404, {"error": "not_found"}, None
         base = p.get("base_updated_at")
         if op == "update":
+            if cur.get("add_only"):
+                return 409, {"error": "add_only", "message": "Imported entries are add-only: they cannot be edited or deleted."}, None
             if base and base != cur.get("updated_at"):
                 return 409, {"error": "conflict", "note": note_view(cur)}, None
             want = int(cur.get("ver") or 0) + 1 if is_e2e(cur) else 1

@@ -120,6 +120,11 @@ STAGE3_ROUTES = {
     "/api/vault/actions": "nullvault_actions", "/api/vault/actions/run": "nullvault_actions",
     "/api/vault/layout": "nullvault_layout",  # 0.7.0 optional layout sync (non-secret)
     "/api/vault/config": "nullvault_config",  # 0.7.0 signed config bundle
+    # 0.8.0 bot-to-vault import queue (sealed to the phone's X25519 import key; the server cannot open them)
+    "/api/vault/import/keys": "nullvault_import", "/api/vault/import/submit": "nullvault_import",
+    "/api/vault/import/status": "nullvault_import", "/api/vault/import/key": "nullvault_import",
+    "/api/vault/import/pending": "nullvault_import", "/api/vault/import/decide": "nullvault_import",
+    "/api/vault/import/ack": "nullvault_import",
 }
 
 
@@ -721,6 +726,8 @@ def handle(h, method: str, path: str) -> None:
     except server.VaultIntegrityError:
         server.vault_audit("nullvault_integrity_error", path=path)
         return h._json(500, {"error": "vault_integrity"})
+    except server.VaultAddOnly:
+        return h._json(409, {"error": "add_only", "message": "Imported entries are add-only: they cannot be edited or deleted."})
 
 
 def _ctx(h):
@@ -912,7 +919,7 @@ def _sync_challenge(h):
     if not d:
         return
     purpose = str((h._read_json() or {}).get("purpose") or "sync")
-    if purpose not in ("sync", "write", "files", "status", "chat", "approve", "action"):
+    if purpose not in ("sync", "write", "files", "status", "chat", "approve", "action", "import_key", "import", "import_ack"):
         return h._json(400, {"error": "bad_request"})
     n = nonce_issue(purpose, d["device_id"], SYNC_TTL)
     return h._json(200, {"nonce": n, "expires_in": SYNC_TTL, "purpose": purpose})
@@ -924,7 +931,7 @@ def _sync_challenge(h):
 # sign later requests of SESSION_PURPOSES (payload "signed_by": "session") until it expires. Sync, status, approve,
 # action and register always need K_dev. Each session-signed request still has its own nonce, timestamp, fresh
 # attestation, tamper and APK pin checks; only the signing key differs. Nothing is written to the device registry.
-SESSION_PURPOSES = ("write", "files", "chat")
+SESSION_PURPOSES = ("write", "files", "chat", "import_ack")  # 0.8.0: the import ack (after a fingerprint Approve)
 SESSION_MIN_TTL = 60
 # Server-side life of a delegation (memory only; also ends on revoke, any refusal/flag, a bad signature or a restart).
 # The phone can only USE K_sess within its hardware AUTH_TIMEOUT after a Class 3 fingerprint (checked below, <= 1 h).
@@ -1093,7 +1100,18 @@ def _sync(h):
     return h._json(200, {"entries": entries, "count": len(entries), "lease": make_lease(d["device_id"], now),
                          "pins": pins_manifest(pin, p["apk"]["version_code"]), "server_time": int(now),
                          "e2e": e2e.public_header(), "e2e_min_version_code": e2e.E2E_MIN_VC,
-                         **ext.sync_extras()})
+                         "imports": _imports_summary(d["device_id"]), **ext.sync_extras()})
+
+
+def _imports_summary(did: str) -> dict:
+    """0.8.0: pending-import count and this phone's published import-key id (non-secret) for the Sync badge."""
+    try:
+        import nullvault_import as imp
+        imp.bind(sys.modules[__name__], server)
+        k = imp.published().get(did)
+        return {"pending": imp.pending_count(did), "key_kid": k["kid"] if k else None}
+    except Exception:  # noqa: BLE001
+        return {"pending": 0, "key_kid": None}
 
 
 def _write(h):
@@ -1114,6 +1132,10 @@ def _write(h):
         registry_append("write", device_id=d["device_id"], record="e2e_header", op=op, ip=ip, ua=ua)
         server.vault_audit("device_write", device=d["device_id"], kind="e2e_header", op=op, ip=ip, ua=ua)
         return h._json(200, {"ok": True, "op": op, **body, "lease": make_lease(d["device_id"], time.time())})
+    if kind == "entry" and op in ("update", "delete") and (server._vault_read_raw(server._vault_safe_id(
+            str((p.get("entry") or {}).get("id") or "")) or "") or {}).get("add_only"):
+        server.vault_audit("device_write_refused", device=d["device_id"], op=op, reason="add_only", ip=ip, ua=ua)
+        return h._json(409, {"error": "add_only", "message": "Imported entries are add-only: they cannot be edited or deleted."})
     if kind == "entry" and op != "delete" and e2e.header() is not None:
         st, body, rid = e2e.entry_write(p, op)
         if st != 200:
@@ -1333,6 +1355,15 @@ def main(argv):
     gc = sub.add_parser("gen-config-key", help="0.7.0: write the config-signing key (0600, no overwrite); prints the PUBLIC key only")
     gc.add_argument("--out", default=None)
     sub.add_parser("config-show", help="0.7.0: config bundle version, sections and public key (no private key)")
+    it = sub.add_parser("import-token-add", help="0.8.0: mint an import-only token into a NEW 0600 file (never printed)")
+    it.add_argument("--name", required=True); it.add_argument("--label", default=None); it.add_argument("--out", required=True)
+    ir = sub.add_parser("import-token-revoke"); ir.add_argument("--name", required=True)
+    sub.add_parser("import-token-list"); sub.add_parser("import-list", help="0.8.0: import queue metadata (no content)")
+    sub.add_parser("import-purge", help="0.8.0: expire/purge old imports now")
+    isub = sub.add_parser("import-submit", help="0.8.0: seal a NAMED server file to the published phone key and submit it")
+    isub.add_argument("--file-ref", required=True, choices=["config-signing-key"])
+    isub.add_argument("--token-file", default=None); isub.add_argument("--device-id", default=None)
+    isub.add_argument("--base", default="http://127.0.0.1:8766"); isub.add_argument("--host", default=None)
     args = ap.parse_args(argv)
     server.ensure_dirs()
     if args.cmd == "pin-add":
@@ -1382,6 +1413,34 @@ def main(argv):
         b = cf.bundle()
         cfg = json.loads(base64.b64decode(b["payload"]))["config"]
         print(f"config version {b['version']}; sections: {', '.join(sorted(cfg))}; public key {cf.public_key_b64()}")
+        return 0
+    elif args.cmd.startswith("import-"):
+        import nullvault_import as imp
+        os.environ.setdefault("NULLVAULT_IMPORT_SWEEP", "0")
+        imp.bind(sys.modules[__name__], server)
+        if args.cmd == "import-token-add":
+            out = Path(args.out)
+            if out.exists():
+                print("refusing to overwrite existing token file"); return 1
+            r = imp.token_add(args.name, args.label or args.name, out)
+            print(f"import token {r['id']} for {r['name']} ({r['label']}), scope {r['scope']}, written to {out} (0600); not printed")
+        elif args.cmd == "import-token-revoke":
+            print(f"revoked {imp.token_revoke(args.name)}")
+        elif args.cmd == "import-token-list":
+            for t in imp.token_list():
+                print(t["id"], t["name"], t["label"], t["scope"], "revoked" if t["revoked_at"] else "active")
+        elif args.cmd == "import-list":
+            keys = imp.published()
+            print(f"published import keys: {', '.join(d + ':' + k['kid'] for d, k in keys.items()) or 'none'}")
+            for iid, x in sorted(imp._index().items(), key=lambda y: y[1].get("created_at", 0)):
+                print(iid, x["status"], x["submitter"], x["type"], x["title"][:60], time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(x["created_at"])))
+        elif args.cmd == "import-purge":
+            print(f"purged {imp.purge()}")
+        else:
+            tf = args.token_file or os.environ.get("NULLVAULT_IMPORT_TOKEN_FILE") or str(server.BASE / "secrets" / "nullvault_import_forge.token")
+            r = imp.submit_ref(args.file_ref, tf, args.base, args.device_id, host=args.host)
+            print(json.dumps(r, sort_keys=True))
+            return 0 if r.get("ok") else 1
         return 0
     elif args.cmd == "gen-lease-key":
         out = Path(args.out)

@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import secrets
+import shutil
 import tempfile
 import time
 import uuid
@@ -55,7 +56,10 @@ class NullVaultBase(AuthBase):
         nv = server.DATA / "nullvault"
         if nv.exists():
             for f in nv.iterdir():
-                f.unlink()
+                if f.is_dir():
+                    shutil.rmtree(f)   # 0.8.0: data/nullvault/imports/
+                else:
+                    f.unlink()
         for f in server.VAULT_DIR.glob("*.json"):
             f.unlink()
         server.VAULT_AUDIT_FILE.unlink(missing_ok=True)

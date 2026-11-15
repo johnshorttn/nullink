@@ -748,6 +748,10 @@ class VaultE2EItem(Exception):
     """0.6.0: an end-to-end encrypted item; the server cannot read or rewrite its contents."""
 
 
+class VaultAddOnly(Exception):
+    """0.8.0: an imported entry (bot import approved on the phone): never updated or deleted on any route."""
+
+
 VAULT_E2E_TITLE = "Encrypted item (open in NullVault)"
 VAULT_E2E_MESSAGE = "End-to-end encrypted: only NullVault on John's phone can open or change it."
 
@@ -920,7 +924,7 @@ def vault_rename_label(old: str, new: str | None) -> int:
     with _lock:
         for fp in sorted(VAULT_DIR.glob("*.json")):
             data = _vault_read_raw(fp.stem)
-            if not data:
+            if not data or data.get("add_only"):
                 continue
             tags = _normalize_vault_tags(data.get("tags"))
             if old_l not in [t.lower() for t in tags]:
@@ -944,6 +948,8 @@ def save_vault_snippet(entry: dict) -> dict:
     ensure_dirs()
     vid = _vault_safe_id(str(entry.get("id") or "")) or uuid.uuid4().hex[:12]
     prior = _vault_read_raw(vid)
+    if prior and prior.get("add_only"):
+        raise VaultAddOnly(vid)  # 0.8.0 imported entries: add-only on every route
     if prior and isinstance(prior.get("e2e"), dict):
         raise VaultE2EItem(vid)  # never overwrite ciphertext with a server-readable copy
     now = iso_now()
@@ -976,6 +982,9 @@ def delete_vault_snippet(vid: str) -> bool:
     fp = _vault_path(vid)
     if not fp or not fp.exists():
         return False
+    prior = _vault_read_raw(fp.stem)
+    if prior and prior.get("add_only"):
+        raise VaultAddOnly(fp.stem)  # 0.8.0 imported entries cannot be deleted (phone, web or CLI)
     try:
         fp.unlink()
         return True
@@ -5292,7 +5301,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._vault_stepup_error()
         vault_audit("delete", id=vid, ip=client_ip(self), ua=str(self.headers.get("User-Agent") or "")[:160])
         vid = urllib.parse.unquote(str(vid or "")).strip()
-        if not delete_vault_snippet(vid):
+        try:
+            gone = delete_vault_snippet(vid)
+        except VaultAddOnly:
+            vault_audit("delete_refused", id=vid, reason="add_only", ip=client_ip(self))
+            return self._json(409, {"error": "add_only", "message": "Imported entries are add-only: they cannot be deleted."})
+        if not gone:
             return self._json(404, {"error": "not_found"})
         return self._json(200, {"ok": True, "id": vid})
 
