@@ -316,7 +316,7 @@ class ActionsTests(S3Base):
             for part in spec["argv"]:
                 self.assertNotIn(part, ("sh", "bash", "-c", "/bin/sh", "/bin/bash"))
                 if part.startswith("{"):
-                    self.assertIn(part.strip("{}"), spec["args"])
+                    self.assertIn(part.strip("{}"), spec["params"])
 
     def test_allowlisted_run_and_audit(self):
         os.environ["NULLVAULT_ACTIONS_ALLOW"] = "nullink-health,nulldo-journal,bogus"

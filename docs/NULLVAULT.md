@@ -146,3 +146,35 @@ Recommended first allowlist if John agrees: `NULLVAULT_ACTIONS=1`, `NULLVAULT_AC
   revoke, 2-device cap and alerts are the backstop (DESIGN §7).
 - Nonces live in memory; a restart invalidates outstanding ones (clients just ask again).
 - Play Integrity skipped (decision 5).
+
+## 0.7.0: server-driven commands and layout sync (2026-11-14)
+
+**Commands.** `GET /api/vault/actions` (device bearer) is the only source of the phone's command list. Each allowlisted
+command is sent as `{id, name, label, description, group, confirm, privilege, params, args}`, where `params` is a
+JSON-Schema subset (`{"type":"object","properties":{...},"required":[...],"additionalProperties":false}`; properties are
+`integer` with `minimum`/`maximum`/`default`, or `string` with `enum`/`default`). `args` is the 0.6.0 form, kept for
+older phones. `version` is a hash of the list, so it changes when a command is added, removed or edited. The argv,
+timeouts and limits never leave the server. `POST /api/vault/actions/run` is unchanged (fresh K_dev signature with
+purpose `action`, allowlist check, rate limits, `actions.jsonl` run/result, `device_action` audit, alert), and the
+arguments are validated against the same `params` schema. The allowlist is still only the systemd drop-in.
+
+**Layout sync (optional, off by default on the phone).** `GET /api/vault/layout` and `POST /api/vault/layout`
+(device bearer; not a security setting, so no fingerprint) hold one non-secret document per owner in
+`data/nullvault/layout.json` (nullink 600): `{"layout": {v, buttons[], groups[], start}, "updated_at_ms", "device_id"}`.
+The shape is checked strictly (≤10 buttons, ≤5 per row, 2 rows, short labels and icons, page names, no unknown keys,
+8 KB cap). The most recent change wins (the phone's change time, clamped to server time + 5 min). Audit event:
+`device_layout_set`. Delete the file to clear it.
+
+**Signed config bundle.** `GET /api/vault/config` (device bearer) returns `{"bundle": {"payload", "sig"}, "version"}`.
+`payload` is canonical JSON `{kind:"nullvault-config", v:1, version, issued_at, config}` signed with Ed25519 by a
+dedicated key at `secrets/nullvault_config_signing.key` (nullink 600; not the device or E2E keys; created with
+`nullvault.py gen-config-key`, which prints only the public key). The public key is pinned in the APK; the phone rejects
+unsigned, badly signed, schema-invalid and rollback bundles (older version, or same version with different bytes) and
+keeps its last good cache. Sections: `status_checks` (services, interval, down_after), `alerts` (server_down,
+approval_waiting, quick_action_run, quiet hours), `approvals` (kinds, confirm text, whether the phone may decide),
+`chat` (bots/sessions), `files` (suggested-tag rules), `links` (auto-category rules), `password_health` (min length,
+stale days, reuse check, weak bits; evaluated on the phone). Defaults are built from the live services/bots; overrides go
+in `data/nullvault/config.json`; `data/nullvault/config_state.json` holds the monotonic version (bumped when content
+changes). Security policy is hardcoded in the APK (fingerprint window, tamper checks, E2E crypto, wipe/lock, cert pin,
+device cap) and forbidden or unknown keys are ignored by the phone and refused by the server. `nullvault.py config-show`
+prints the public key and version. If the key is lost, generate a new one and ship an APK pinning the new public key.

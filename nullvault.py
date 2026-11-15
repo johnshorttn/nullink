@@ -118,6 +118,8 @@ STAGE3_ROUTES = {
     "/api/vault/chat/messages": "nullvault_chat", "/api/vault/chat/send": "nullvault_chat",
     "/api/vault/approvals": "nullvault_approvals", "/api/vault/approvals/decide": "nullvault_approvals",
     "/api/vault/actions": "nullvault_actions", "/api/vault/actions/run": "nullvault_actions",
+    "/api/vault/layout": "nullvault_layout",  # 0.7.0 optional layout sync (non-secret)
+    "/api/vault/config": "nullvault_config",  # 0.7.0 signed config bundle
 }
 
 
@@ -1328,6 +1330,9 @@ def main(argv):
     sub.add_parser("list"); sub.add_parser("verify")
     g = sub.add_parser("gen-lease-key", help="write a new Ed25519 lease key (base64) to a 0600 file")
     g.add_argument("--out", required=True)
+    gc = sub.add_parser("gen-config-key", help="0.7.0: write the config-signing key (0600, no overwrite); prints the PUBLIC key only")
+    gc.add_argument("--out", default=None)
+    sub.add_parser("config-show", help="0.7.0: config bundle version, sections and public key (no private key)")
     args = ap.parse_args(argv)
     server.ensure_dirs()
     if args.cmd == "pin-add":
@@ -1365,6 +1370,19 @@ def main(argv):
             print(d["device_id"], d["status"], d.get("assurance"), d.get("manufacturer"), d.get("model"), d.get("last_seen_at"))
     elif args.cmd == "verify":
         print("registry intact" if registry_verify() else "REGISTRY CHAIN BROKEN")
+    elif args.cmd in ("gen-config-key", "config-show"):
+        import nullvault_config as cf
+        cf.bind(sys.modules[__name__], server)
+        if args.cmd == "gen-config-key":
+            out = Path(args.out) if args.out else cf.key_path()
+            if out.exists():
+                print("refusing to overwrite existing key file"); return 1
+            print(f"wrote {out} (0600). Public key (pin this in the APK): {cf.gen_key(out)}")
+            return 0
+        b = cf.bundle()
+        cfg = json.loads(base64.b64decode(b["payload"]))["config"]
+        print(f"config version {b['version']}; sections: {', '.join(sorted(cfg))}; public key {cf.public_key_b64()}")
+        return 0
     elif args.cmd == "gen-lease-key":
         out = Path(args.out)
         if out.exists():
