@@ -10,6 +10,8 @@ phone's opt-in background check can read status without unlocking the vault. Bot
 
 Down alerts: no push service (no Firebase/FCM). A server thread checks every 60 s and sends a Slack DM through the
 existing NullVault alert path on active -> not-active transitions (and recovery), rate-limited per item.
+Monitor fix (2026-11-23): a failed `systemctl show` (timeout/OSError/empty output) is "check_failed" (ok=None), never
+DOWN; a DOWN alert needs DOWN_CONFIRM consecutive real failed readings, and "is back" only follows an alerted DOWN.
 Left out because they need privileges nullink does not have: other units' journal errors, docker container state
 (docker socket), SMART/disk health, other users' process details, failed-login counts.
 """
@@ -39,6 +41,9 @@ STATUS_TOKEN_TTL = 90 * 86400
 CACHE_TTL = 30
 TLS_CACHE_TTL = 6 * 3600
 ALERT_GAP = 1800
+SYSTEMCTL_TIMEOUT = 15
+SYSTEMCTL_RETRY_SLEEP = 1.0
+DOWN_CONFIRM = 2  # consecutive real (not check_failed) failed readings before a DOWN alert
 DISK_ALERT_PCT = 95
 OMITTED = ["journal errors of other units (needs adm/systemd-journal group)",
            "docker container state (needs the docker socket)",
@@ -48,7 +53,11 @@ _UNIT = re.compile(r"^[A-Za-z0-9@_.:-]{1,80}$")
 _lock = threading.RLock()
 _cache: dict = {"t": 0.0, "data": None}
 _tls_cache: dict = {"t": 0.0, "certs": []}
-_mon: dict = {"state": {}, "last_alert": {}, "thread": None}
+_mon: dict = {"state": {}, "last_alert": {}, "fails": {}, "alerted": set(), "thread": None}
+
+
+def _log(msg: str) -> None:
+    print(f"nullvault-status: {msg}", file=sys.stderr, flush=True)
 
 
 def bind(nv_mod, srv):
@@ -78,12 +87,20 @@ def services() -> list[str]:
 # ---------------------------------------------------------------- metrics (read-only, unprivileged)
 
 def run_systemctl_show(units: list[str]) -> str:  # tests patch this
+    """`systemctl show` with a 15 s timeout, retried once after 1 s; the last error is re-raised."""
     if not units:
         return ""
-    r = subprocess.run(["systemctl", "show", "--no-pager", "-p", "Id", "-p", "ActiveState", "-p", "SubState",
-                        "-p", "ActiveEnterTimestamp", "-p", "LoadState", *[u if "." in u else u + ".service" for u in units]],
-                       capture_output=True, text=True, timeout=5, check=False)
-    return r.stdout
+    cmd = ["systemctl", "show", "--no-pager", "-p", "Id", "-p", "ActiveState", "-p", "SubState",
+           "-p", "ActiveEnterTimestamp", "-p", "LoadState", *[u if "." in u else u + ".service" for u in units]]
+    last = None
+    for attempt in range(2):
+        if attempt:
+            time.sleep(SYSTEMCTL_RETRY_SLEEP)
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=SYSTEMCTL_TIMEOUT, check=False).stdout
+        except (OSError, subprocess.SubprocessError) as e:
+            last = e
+    raise last
 
 
 def parse_show(text: str) -> list[dict]:
@@ -110,10 +127,16 @@ def parse_show(text: str) -> list[dict]:
 
 
 def service_states() -> list[dict]:
+    """Unit rows. If the check itself fails, every row is active="unknown", sub="check_failed", ok=None (not DOWN)."""
+    names = services()
     try:
-        return parse_show(run_systemctl_show(services()))
-    except (OSError, subprocess.SubprocessError):
-        return [{"name": n, "active": "unknown", "sub": "", "since": None, "ok": False} for n in services()]
+        rows = parse_show(run_systemctl_show(names))
+        if names and not rows:
+            raise subprocess.SubprocessError("empty systemctl show output")
+        return rows
+    except (OSError, subprocess.SubprocessError) as e:
+        _log(f"WARNING service check failed ({type(e).__name__}: {str(e)[:200]}); reporting check_failed, not DOWN")
+        return [{"name": n, "active": "unknown", "sub": "check_failed", "since": None, "ok": None} for n in names]
 
 
 def _read(p: str) -> str:
@@ -218,13 +241,17 @@ def collect(force: bool = False) -> dict:
     with _lock:
         if not force and _cache["data"] and now - _cache["t"] < CACHE_TTL:
             return _cache["data"]
-    svcs = service_states()
+    raw = service_states()
+    failed = [s["name"] for s in raw if s["ok"] is None]
+    # Wire shape stays backward compatible: the app's ServiceState.ok is a non-null Boolean, so a check_failed row is
+    # sent as ok=false plus check_failed=true, and it is NOT listed in health.down.
+    svcs = [dict(s, ok=False, check_failed=True) if s["ok"] is None else s for s in raw]
     tokens = [dict(t, days_left=_days_left(t["expires_at"], now)) for t in tls_certs() + seeded_tokens()]
     import nullvault_ext as ext
     hm = host_metrics()
     data = {"server_label": ext.server_label(), "time": _now_iso(now),
-            "health": {"ok": True, "services_ok": all(s["ok"] for s in svcs) if svcs else None,
-                       "down": [s["name"] for s in svcs if not s["ok"]]},
+            "health": {"ok": True, "services_ok": (all(s["ok"] for s in raw) if not failed else None) if raw else None,
+                       "down": [s["name"] for s in raw if s["ok"] is False], "check_failed": failed},
             **hm, "services": svcs, "tokens": tokens, "omitted": OMITTED}
     with _lock:
         _cache.update(t=now, data=data)
@@ -286,7 +313,10 @@ def _send(key: str, text: str, now: float) -> bool:
 
 
 def monitor_tick(now: float | None = None) -> list[str]:
-    """One check. Alerts on active -> not-active (and back), and disk crossing DISK_ALERT_PCT. Returns texts sent."""
+    """One check. Alerts on active -> not-active (and back), and disk crossing DISK_ALERT_PCT. Returns texts sent.
+
+    ok=None (check_failed) leaves the stored state alone and never alerts. DOWN needs DOWN_CONFIRM consecutive real
+    failed readings after a known-ok state; "is back" is sent only after a DOWN alert actually went out."""
     now = now or time.time()
     sent = []
     import nullvault_ext as ext
@@ -295,15 +325,31 @@ def monitor_tick(now: float | None = None) -> list[str]:
     for dk in host_metrics()["disk"]:
         items["disk:" + dk["mount"]] = (dk["pct"] < DISK_ALERT_PCT, f"{dk['pct']}% used")
     with _lock:
+        fails, alerted = _mon.setdefault("fails", {}), _mon.setdefault("alerted", set())
         for key, (ok, detail) in items.items():
-            prev = _mon["state"].get(key)
-            _mon["state"][key] = ok
-            if prev is None or prev == ok:
-                continue  # first sighting is the baseline; only transitions alert
+            if ok is None:
+                continue  # the check failed, not the unit: no state change, no alert
             what = key.split(":", 1)[1]
-            text = (f":red_circle: NullVault status: *{what}* on {label} is DOWN ({detail})" if not ok
-                    else f":large_green_circle: NullVault status: *{what}* on {label} is back ({detail})")
-            if _send(key + (":down" if not ok else ":up"), text, now):
+            prev = _mon["state"].get(key)
+            if ok:
+                fails[key] = 0
+                _mon["state"][key] = True
+                if key in alerted:
+                    alerted.discard(key)
+                    text = f":large_green_circle: NullVault status: *{what}* on {label} is back ({detail})"
+                    if _send(key + ":up", text, now):
+                        sent.append(text)
+                continue
+            fails[key] = fails.get(key, 0) + 1
+            if prev is None:
+                _mon["state"][key] = False  # first sighting is the baseline; only transitions alert
+                continue
+            if prev is False or fails[key] < DOWN_CONFIRM:
+                continue  # already down, or not confirmed yet (state stays ok until confirmed)
+            _mon["state"][key] = False
+            text = f":red_circle: NullVault status: *{what}* on {label} is DOWN ({detail})"
+            if _send(key + ":down", text, now):
+                alerted.add(key)
                 sent.append(text)
     return sent
 
@@ -328,8 +374,8 @@ def start_monitor() -> bool:
                         ext.bind(nv, nv.server)
                         globals()["server"] = nv.server
                         monitor_tick()
-            except Exception:  # noqa: BLE001 - never take the server down
-                pass
+            except Exception as e:  # noqa: BLE001 - never take the server down
+                _log(f"ERROR monitor tick failed ({type(e).__name__}: {str(e)[:200]})")
     t = threading.Thread(target=loop, name="nullvault-status", daemon=True)
     _mon["thread"] = t
     t.start()

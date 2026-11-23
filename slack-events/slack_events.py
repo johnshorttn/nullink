@@ -1726,6 +1726,16 @@ def _relay_loop() -> None:
 
 
 # ----------------------------------------------------------------------------- HTTP
+class QuietServer(ThreadingHTTPServer):
+    """socketserver.handle_error prints a full traceback per request; skip it only for a peer that hung up."""
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            log.info("client %s went away (%s)", client_address[0], type(sys.exc_info()[1]).__name__)
+            return
+        super().handle_error(request, client_address)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "nullverse-slack-events/1"
 
@@ -1738,7 +1748,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError) as e:
+            # The peer (Caddy) already gave up on this request, e.g. during a host stall. Nothing to send it; one line.
+            log.info("client went away before response %s was sent (%s)", code, type(e).__name__)
 
     def _local(self) -> bool:
         return self.client_address[0] in LOOPBACK and not self.headers.get("X-Forwarded-For")
@@ -1874,7 +1889,7 @@ def main() -> None:
     registry()
     for target in (_worker, _worker, _join_loop, _relay_loop, _bridge_loop, _wake_post_loop):
         threading.Thread(target=target, daemon=True).start()
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    srv = QuietServer((HOST, PORT), Handler)
     log.info("listening on %s:%s (registry %s)", HOST, PORT, REGISTRY)
     srv.serve_forever()
 

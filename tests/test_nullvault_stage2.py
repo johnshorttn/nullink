@@ -2,6 +2,7 @@
 down-transition Slack alerts, rate limit) and encrypted project notes (signed writes, at-rest encryption, sync)."""
 import json
 import os
+import subprocess
 from pathlib import Path
 from unittest import mock
 
@@ -31,6 +32,9 @@ ActiveEnterTimestamp=
 """
 
 
+ST_REAL_RUN = st.run_systemctl_show
+
+
 class S2Base(NullVaultBase):
     def setUp(self):
         super().setUp()
@@ -41,7 +45,7 @@ class S2Base(NullVaultBase):
         ext.nv, ext.server = nullvault, server
         st.bind(nullvault, server)
         st._cache.update(t=0.0, data=None); st._tls_cache.update(t=0.0, certs=[])
-        st._mon["state"].clear(); st._mon["last_alert"].clear()
+        st._mon["state"].clear(); st._mon["last_alert"].clear(); st._mon["fails"].clear(); st._mon["alerted"].clear()
         ext._disc_cache.update(t=0.0, sites=[], source=None)
         p = mock.patch.object(st, "run_systemctl_show", return_value=SHOW); p.start(); self.addCleanup(p.stop)
         p2 = mock.patch.object(ext, "CADDYFILE", Path("/nonexistent/Caddyfile")); p2.start(); self.addCleanup(p2.stop)
@@ -113,26 +117,89 @@ class StatusTests(S2Base):
 
 
 class MonitorTests(S2Base):
+    UP = SHOW.replace("ActiveState=failed", "ActiveState=active")
+
+    def tick(self, t, show=None):
+        with mock.patch.object(st, "run_systemctl_show", return_value=SHOW if show is None else show):
+            return st.monitor_tick(t)
+
     def test_transitions_alert_rate_limited(self):
         sent = []
         with mock.patch.object(nullvault, "send_alert", side_effect=sent.append):
-            st.monitor_tick(1000)  # baseline: caddy already failed -> no alert
+            self.tick(1000)  # baseline: caddy already failed -> no alert
+            self.tick(1060, self.UP)  # recovery of a never-alerted DOWN: silent
             self.assertEqual(sent, [])
-            up = SHOW.replace("ActiveState=failed", "ActiveState=active")
-            with mock.patch.object(st, "run_systemctl_show", return_value=up):
-                st.monitor_tick(1060)
-            self.assertEqual(len(sent), 1); self.assertIn("caddy", sent[0]); self.assertIn("back", sent[0])
-            st.monitor_tick(1120)  # down again
-            self.assertEqual(len(sent), 2); self.assertIn("DOWN", sent[1])
-            with mock.patch.object(st, "run_systemctl_show", return_value=up):
-                st.monitor_tick(1180)
-            st.monitor_tick(1240)  # flapping inside 30 min: suppressed
+            self.tick(1120); self.assertEqual(sent, [])  # 1st failed reading: not confirmed yet
+            self.tick(1180)  # 2nd consecutive: DOWN
+            self.assertEqual(len(sent), 1); self.assertIn("caddy", sent[0]); self.assertIn("DOWN", sent[0])
+            self.tick(1240, self.UP)
+            self.assertEqual(len(sent), 2); self.assertIn("back", sent[1])
+            self.tick(1300); self.tick(1360)  # confirmed DOWN again inside 30 min: suppressed
+            self.tick(1420, self.UP)  # suppressed DOWN was never sent -> no "back" either
             self.assertEqual(len(sent), 2)
-            with mock.patch.object(st, "run_systemctl_show", return_value=up):
-                st.monitor_tick(1300)
-            st.monitor_tick(1120 + st.ALERT_GAP + 1)
-            self.assertEqual(len(sent), 3)
+            self.tick(1180 + st.ALERT_GAP + 1); self.tick(1180 + st.ALERT_GAP + 61)
+            self.assertEqual(len(sent), 3); self.assertIn("DOWN", sent[2])
         self.assertFalse(any("ghost" in s for s in sent))  # not-found units never alert
+
+    def test_systemctl_timeout_is_check_failed_not_down(self):
+        sent, calls = [], []
+
+        def boom(*a, **k):
+            calls.append(k.get("timeout"))
+            raise subprocess.TimeoutExpired("systemctl", k.get("timeout"))
+        with mock.patch.object(nullvault, "send_alert", side_effect=sent.append):
+            self.tick(1000, self.UP)  # baseline: all active
+            with mock.patch.object(st, "run_systemctl_show", ST_REAL_RUN), \
+                 mock.patch.object(st.subprocess, "run", side_effect=boom), mock.patch.object(st.time, "sleep") as sl:
+                rows = st.service_states()
+                st.monitor_tick(1060); st.monitor_tick(1120)  # two failed checks in a row: still no DOWN
+            self.assertEqual(calls[:2], [st.SYSTEMCTL_TIMEOUT, st.SYSTEMCTL_TIMEOUT])  # 15 s, retried once
+            sl.assert_called_with(st.SYSTEMCTL_RETRY_SLEEP)
+            self.assertTrue(all(r["ok"] is None and r["sub"] == "check_failed" for r in rows))
+            self.tick(1180, self.UP)
+        self.assertEqual(sent, [])  # no DOWN and no "back"
+        self.assertTrue(st._mon["state"]["svc:caddy"])
+
+    def test_check_failed_then_active_sends_nothing(self):
+        sent = []
+        with mock.patch.object(nullvault, "send_alert", side_effect=sent.append):
+            self.tick(1000, self.UP)
+            self.tick(1060, "")  # empty systemctl output counts as a failed check
+            self.tick(1120, self.UP)
+        self.assertEqual(sent, [])
+
+    def test_single_failed_reading_then_active_sends_nothing(self):
+        sent = []
+        with mock.patch.object(nullvault, "send_alert", side_effect=sent.append):
+            self.tick(1000, self.UP); self.tick(1060); self.tick(1120, self.UP)
+            self.tick(1180); self.tick(1240, self.UP)
+        self.assertEqual(sent, [])
+
+    def test_two_failed_readings_one_down_then_back(self):
+        sent = []
+        with mock.patch.object(nullvault, "send_alert", side_effect=sent.append):
+            self.tick(1000, self.UP); self.tick(1060); self.tick(1120); self.tick(1180)
+            self.assertEqual(len(sent), 1); self.assertIn("*caddy*", sent[0]); self.assertIn("DOWN", sent[0])
+            self.tick(1240, self.UP)
+        self.assertEqual(len(sent), 2); self.assertIn("*caddy*", sent[1]); self.assertIn("is back", sent[1])
+
+    def test_check_failed_between_failures_does_not_reset_or_alert(self):
+        sent = []
+        with mock.patch.object(nullvault, "send_alert", side_effect=sent.append):
+            self.tick(1000, self.UP); self.tick(1060); self.tick(1120, ""); self.assertEqual(sent, [])
+            self.tick(1180)  # 2nd real failed reading (the check_failed tick is not a reading)
+        self.assertEqual(len(sent), 1)
+
+    def test_status_route_check_failed_shape(self):
+        with mock.patch.object(st, "run_systemctl_show", side_effect=OSError("boom")), \
+             mock.patch.object(st, "cert_expiry", return_value=None):
+            code, _, js, _ = self.req("/api/vault/status", headers=self.bearer(self.dev))
+        self.assertEqual(code, 200, js)
+        self.assertEqual(js["health"]["down"], [])  # a failed check is not DOWN
+        self.assertIsNone(js["health"]["services_ok"])
+        self.assertEqual(sorted(js["health"]["check_failed"]), ["caddy", "ghost", "nullink"])
+        for s in js["services"]:  # app's ServiceState.ok is a non-null Boolean: keep it a bool
+            self.assertIs(s["ok"], False); self.assertTrue(s["check_failed"]); self.assertEqual(s["sub"], "check_failed")
 
     def test_alerts_respect_switch(self):
         os.environ["NULLVAULT_ALERTS"] = "0"; self.addCleanup(os.environ.pop, "NULLVAULT_ALERTS", None)
@@ -200,6 +267,24 @@ class NotesTests(S2Base):
 
 
 class MonitorLoopBindingTests(S2Base):
+    def test_loop_logs_tick_exception(self):
+        st._mon["thread"] = None
+        naps = []
+
+        def nap(s):
+            naps.append(s)
+            if len(naps) > 1:
+                raise SystemExit
+        with mock.patch.object(nullvault, "server", server), mock.patch.object(st.time, "sleep", nap), \
+             mock.patch.object(st, "monitor_tick", side_effect=RuntimeError("tick blew up")), \
+             mock.patch.object(st.threading, "Thread") as T, mock.patch.object(st, "_log") as lg:
+            st.start_monitor()
+            with self.assertRaises(SystemExit):
+                T.call_args.kwargs["target"]()
+        st._mon["thread"] = None
+        msg = lg.call_args.args[0]
+        self.assertIn("RuntimeError", msg); self.assertIn("tick blew up", msg)
+
     def test_loop_binds_live_server_and_ticks(self):
         """The thread finds the running server module itself (no request needed) and then alerts on transitions."""
         sent = []
